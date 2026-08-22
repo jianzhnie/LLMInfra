@@ -86,8 +86,11 @@ class MultiModalRotaryPositionEmbedding(BasePositionalEncoding):
         if position_ids is None:
             # Text-only fast path: every axis receives the token index, so
             # the per-axis loop collapses into one outer product whose
-            # (seq, freq) cos/sin broadcasts over batch and heads.
-            positions = torch.arange(seq_len, device=x.device, dtype=x.dtype)
+            # (seq, freq) cos/sin broadcasts over batch and heads. The index
+            # is built as an integer and then cast: torch.arange in bf16
+            # rounds positions >= 2057 differently than an integer->bf16
+            # cast, which would diverge from the explicit-position_ids path.
+            positions = torch.arange(seq_len, device=x.device).to(dtype=x.dtype)
             frequency = torch.outer(positions, inv_freq.to(dtype=x.dtype))
             cos = frequency.cos()
             sin = frequency.sin()

@@ -173,6 +173,16 @@ class CompressedSparseAttention(BaseAttention):
         device: torch.device,
     ) -> torch.Tensor:
         """Build a ``(batch, heads, q_len, compressed_len)`` selection mask."""
+        if q_len == 0:
+            # ``q_block.max()`` below is undefined on empty sequences.
+            return torch.zeros(
+                batch_size,
+                self.num_heads,
+                0,
+                compressed_len,
+                dtype=torch.bool,
+                device=device,
+            )
         q_block = torch.arange(q_len, device=device) // self.compress_ratio
         num_q_blocks = int(q_block.max()) + 1
         if block_indices is None:

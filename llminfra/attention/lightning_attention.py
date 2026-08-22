@@ -145,7 +145,12 @@ class LightningAttention(BaseAttention):
             state = state + torch.matmul(k_block.transpose(-1, -2), v_block)
             normalizer = normalizer + k_block.sum(dim=(2, 3), keepdim=True)
 
-        output: torch.Tensor = torch.cat(outputs, dim=2)
+        if outputs:
+            output: torch.Tensor = torch.cat(outputs, dim=2)
+        else:
+            # Empty sequence: no block was processed; an empty slice of
+            # ``value`` keeps the autograd graph alive.
+            output = value[:, :, :0]
         output = self.o_proj(self.combine_head(output))
         if self.training and self.dropout_prob > 0:
             output = self.dropout(output)

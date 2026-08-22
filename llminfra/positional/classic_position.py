@@ -79,7 +79,9 @@ class SinusoidalPositionEmbedding(BasePositionalEncoding):
             if x.dim() < 2 or x.size(-1) != self.dim:
                 raise ValueError(f"x must end in (seq_len, {self.dim})")
             if x.size(-2) > self.max_seq_len:
-                raise ValueError("position_ids contain an out-of-range position")
+                raise ValueError(
+                    f"seq_len {x.size(-2)} exceeds max_seq_len {self.max_seq_len}"
+                )
             encoding = self.encoding
             assert isinstance(encoding, torch.Tensor)
             positional = encoding[: x.size(-2)].to(dtype=x.dtype)
@@ -129,7 +131,9 @@ class LearnedAbsolutePositionEmbedding(BasePositionalEncoding):
             if x.dim() < 2 or x.size(-1) != self.dim:
                 raise ValueError(f"x must end in (seq_len, {self.dim})")
             if x.size(-2) > self.max_seq_len:
-                raise ValueError("position_ids contain an out-of-range position")
+                raise ValueError(
+                    f"seq_len {x.size(-2)} exceeds max_seq_len {self.max_seq_len}"
+                )
             output: torch.Tensor = self.dropout(x + self.embedding.weight[: x.size(-2)])
             return output
         positions = _resolve_position_ids(
@@ -198,10 +202,15 @@ class T5RelativePositionBias(BasePositionalEncoding):
         key = (query_length, resolved_key_length, str(device))
         buckets = self._bucket_cache.get(key)
         if buckets is None:
-            context = torch.arange(query_length, device=device)[:, None]
-            memory = torch.arange(resolved_key_length, device=device)[None, :]
-            relative_position = memory - context
-            buckets = self._relative_position_bucket(relative_position)
+            # inference_mode(False) keeps the memoized indices usable in
+            # later autograd-tracked calls even when the first call happens
+            # under torch.inference_mode(); embedding saves its indices for
+            # backward, and inference tensors cannot be saved.
+            with torch.inference_mode(False):
+                context = torch.arange(query_length, device=device)[:, None]
+                memory = torch.arange(resolved_key_length, device=device)[None, :]
+                relative_position = memory - context
+                buckets = self._relative_position_bucket(relative_position)
             # Cap cached elements (~32 MB of int64) so huge grids still work
             # without unbounded memory; a few entries cover layer reuse.
             if buckets.numel() <= 1 << 22:

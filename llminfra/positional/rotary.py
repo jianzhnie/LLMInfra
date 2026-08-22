@@ -37,8 +37,10 @@ def apply_rotary_pos_emb(
         ):
             # Fast path: viewing interleaved pairs as complex numbers turns
             # the rotation into a single complex multiply, avoiding the
-            # repeat_interleave/stack temporaries of the scalar formula.
-            pairs = torch.view_as_complex(x.view(*x.shape[:-1], -1, 2))
+            # repeat_interleave/stack temporaries of the scalar formula. The
+            # pair count is written explicitly because a -1 view dimension
+            # is ambiguous for empty (seq_len == 0) inputs.
+            pairs = torch.view_as_complex(x.view(*x.shape[:-1], x.size(-1) // 2, 2))
             freqs = torch.complex(cos.to(x.dtype), sin.to(x.dtype))
             return torch.view_as_real(pairs * freqs).flatten(-2)
         x1 = x[..., 0::2]

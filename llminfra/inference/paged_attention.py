@@ -192,8 +192,15 @@ class PagedAttentionCache:
                 block_table, num_tokens, num_new, self.block_size, self.key_cache.device
             )
             flat_shape = (-1, self.num_heads, self.head_dim)
-            self.key_cache.view(flat_shape)[slots] = key
-            self.value_cache.view(flat_shape)[slots] = value
+            # Unlike slice assignment, index_put_ does not cast implicitly,
+            # so match the cache dtype/device explicitly (a no-op when the
+            # inputs already match).
+            self.key_cache.view(flat_shape)[slots] = key.to(
+                device=self.key_cache.device, dtype=self.key_cache.dtype
+            )
+            self.value_cache.view(flat_shape)[slots] = value.to(
+                device=self.value_cache.device, dtype=self.value_cache.dtype
+            )
         self.num_tokens[seq_id] = num_tokens + num_new
 
     def get(self, seq_id: int) -> tuple[torch.Tensor, torch.Tensor]:

@@ -129,6 +129,10 @@ class LinearAttention(BaseAttention):
         zeroed by the caller, so they contribute nothing to the state.
         """
         batch_size, _, seq_len, _ = query.shape
+        if seq_len == 0:
+            # The chunk loop never runs for empty sequences and ``torch.cat``
+            # rejects empty lists; empty slices keep the autograd graph alive.
+            return value[:, :, :0], query[:, :, :0, 0]
         state = query.new_zeros(
             batch_size, self.num_heads, self.feature_dim, self.head_dim
         )

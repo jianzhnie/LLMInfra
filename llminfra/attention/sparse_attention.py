@@ -91,6 +91,11 @@ class QueryKeyBlockIndexer(nn.Module):
                     value=fallback,
                 )
             rows.append(selected)
+        if not rows:
+            # Empty sequence: no query blocks to select for.
+            return scores.new_zeros(
+                scores.size(0), scores.size(1), 0, self.top_k, dtype=torch.long
+            )
         return torch.stack(rows, dim=2)
 
     def routing_scores(self, hidden_state: torch.Tensor) -> torch.Tensor:

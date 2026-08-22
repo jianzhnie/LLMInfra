@@ -258,3 +258,30 @@ def test_sparse_indexer_vectorized_matches_loop_reference() -> None:
                 num_heads,
                 batch_size,
             )
+
+
+def test_paged_cache_append_casts_mismatched_dtype_across_blocks() -> None:
+    """Regression: the multi-block scatter path must cast inputs to cache dtype.
+
+    Basic-indexing assignment casts implicitly, but the vectorized scatter
+    uses ``index_put_``, which requires matching dtypes; fp32 inputs into an
+    fp16 cache used to work and must keep working.
+    """
+    cache = PagedAttentionCache(
+        num_blocks=4, block_size=2, num_heads=2, head_dim=4, dtype=torch.float16
+    )
+    key = torch.randn(3, 2, 4)  # spans two physical blocks -> scatter path
+    value = torch.randn(3, 2, 4)
+    cache.append(0, key, value)
+
+    # A second chunk starting mid-block and crossing into the next block.
+    extra_key = torch.randn(2, 2, 4)
+    extra_value = torch.randn(2, 2, 4)
+    cache.append(0, extra_key, extra_value)
+
+    actual_key, actual_value = cache.get(0)
+    assert actual_key.dtype == torch.float16
+    expected_key = torch.cat((key, extra_key)).to(torch.float16)
+    expected_value = torch.cat((value, extra_value)).to(torch.float16)
+    torch.testing.assert_close(actual_key, expected_key)
+    torch.testing.assert_close(actual_value, expected_value)

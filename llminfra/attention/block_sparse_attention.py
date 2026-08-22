@@ -138,6 +138,11 @@ class BlockSparseAttention(BaseAttention):
         device: torch.device,
     ) -> torch.Tensor:
         """Return a ``(batch, heads, q_len, kv_len)`` allowed-block mask."""
+        if q_len == 0:
+            # ``q_block.max()`` below is undefined on empty sequences.
+            return torch.zeros(
+                batch_size, self.num_heads, 0, kv_len, dtype=torch.bool, device=device
+            )
         q_block = torch.arange(q_len, device=device) // self.block_size
         k_block = torch.arange(kv_len, device=device) // self.block_size
         num_q_blocks = int(q_block.max()) + 1

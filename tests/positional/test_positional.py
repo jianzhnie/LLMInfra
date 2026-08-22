@@ -18,6 +18,7 @@ from llminfra import (
     PartialRotaryPositionEmbedding,
     PositionInterpolation,
     RotaryPositionEmbedding,
+    T5RelativePositionBias,
     TwoDimensionalPositionEmbedding,
     YaRNParameters,
     YaRNScaledRotaryEmbedding,
@@ -230,3 +231,76 @@ def test_mrope_validates_sections_and_position_shape():
     mrope = MultiModalRotaryPositionEmbedding(8, mrope_section=(1, 1, 2))
     with pytest.raises(ValueError, match="position_ids"):
         mrope(torch.randn(2, 5, 8), torch.zeros(3, 1, 5))
+
+
+def test_alibi_bias_cache_follows_module_dtype():
+    # The memoized bias must rebuild when .half()/.to(dtype) re-casts the
+    # slopes buffer; otherwise stale float32 values are served forever.
+    alibi = ALiBiBias(num_heads=4, max_seq_len=16)
+    assert alibi(8).dtype == torch.float32
+    alibi.half()
+    bias = alibi(8)
+    assert bias.dtype == torch.float16
+    fresh = ALiBiBias(num_heads=4, max_seq_len=16).half()
+    torch.testing.assert_close(bias, fresh(8), rtol=0, atol=0)
+    alibi.to(torch.float64)
+    assert alibi(8).dtype == torch.float64
+    fresh64 = ALiBiBias(num_heads=4, max_seq_len=16).to(torch.float64)
+    torch.testing.assert_close(alibi(8), fresh64(8), rtol=0, atol=0)
+
+
+def test_t5_bucket_cache_built_in_inference_mode_allows_backward():
+    # Buckets memoized under inference_mode must stay usable as embedding
+    # indices in a later autograd-tracked call.
+    t5 = T5RelativePositionBias(num_heads=2, max_seq_len=16)
+    with torch.inference_mode():
+        t5(8)
+    bias = t5(8)
+    bias.sum().backward()
+    assert t5.relative_attention_bias.weight.grad is not None
+
+
+def test_mrope_text_only_matches_explicit_positions_low_precision():
+    # The text-only fast path must agree with the explicit-position_ids
+    # path even where bf16 cannot represent token indices exactly.
+    mrope = MultiModalRotaryPositionEmbedding(8, mrope_section=(1, 1, 2))
+    seq_len = 2100  # beyond bf16's exact-integer range
+    x = torch.randn(2, seq_len, 8, dtype=torch.bfloat16)
+    position_ids = torch.arange(seq_len).expand(3, seq_len)
+    assert torch.equal(mrope(x), mrope(x, position_ids))
+
+
+def test_apply_rotary_pos_emb_allows_empty_sequence():
+    # The complex fast path must not choke on the ambiguous -1 view of an
+    # empty (seq_len == 0) input.
+    x = torch.randn(1, 0, 8)
+    cos = torch.randn(0, 4)
+    sin = torch.randn(0, 4)
+    out = apply_rotary_pos_emb(x, cos, sin)
+    assert out.shape == x.shape
+    rope = RotaryPositionEmbedding(dim=8, max_seq_len=16)
+    assert rope(x).shape == x.shape
+
+
+def test_rotary_cache_growth_matches_uncached_reference():
+    # Serving seq 32 -> 96 -> 32 from the growing table must match a fresh
+    # per-call computation of the scalar rotation formula.
+    rope = RotaryPositionEmbedding(dim=8, max_seq_len=128)
+    inv_freq = rope.inv_freq
+    assert isinstance(inv_freq, torch.Tensor)
+
+    def reference(x: torch.Tensor) -> torch.Tensor:
+        positions = torch.arange(x.size(-2), dtype=torch.float32)
+        freqs = torch.einsum("s,f->sf", positions, inv_freq.to(torch.float32))
+        cos = torch.cos(freqs).repeat_interleave(2, dim=-1)
+        sin = torch.sin(freqs).repeat_interleave(2, dim=-1)
+        x1 = x[..., 0::2]
+        x2 = x[..., 1::2]
+        rotated = torch.stack((-x2, x1), dim=-1).flatten(-2)
+        return x * cos + rotated * sin
+
+    x32 = torch.randn(2, 32, 8)
+    x96 = torch.randn(2, 96, 8)
+    rope(x32)
+    torch.testing.assert_close(rope(x96), reference(x96))
+    torch.testing.assert_close(rope(x32), reference(x32))

@@ -153,7 +153,9 @@ class KimiDeltaAttention(BaseAttention):
             output_t = torch.matmul(query[:, :, step].unsqueeze(-2), state).squeeze(-2)
             outputs.append(output_t)
 
-        core_output = torch.stack(outputs, dim=2)
+        # Empty sequence: the recurrence never ran; an empty slice of
+        # ``value`` keeps the autograd graph alive.
+        core_output = torch.stack(outputs, dim=2) if outputs else value[:, :, :0]
         core_output = self.combine_head(core_output)
         if self.gate_proj is not None:
             core_output = core_output * torch.sigmoid(self.gate_proj(hidden_state))

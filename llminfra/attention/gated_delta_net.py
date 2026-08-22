@@ -148,7 +148,12 @@ class GatedDeltaNet(BaseAttention):
                 output_t = output_t / safe_denominator
             outputs.append(output_t)
 
-        output: torch.Tensor = torch.stack(outputs, dim=2)
+        if outputs:
+            output: torch.Tensor = torch.stack(outputs, dim=2)
+        else:
+            # Empty sequence: the recurrence never ran; an empty slice of
+            # ``value`` keeps the autograd graph alive.
+            output = value[:, :, :0]
         output = self.o_proj(self.combine_head(output))
         if self.training and self.dropout_prob > 0:
             output = self.dropout(output)

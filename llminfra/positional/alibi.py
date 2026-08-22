@@ -34,9 +34,10 @@ class ALiBiBias(BasePositionalEncoding):
             for head in range(self.num_heads)
         ]
         self.register_buffer("slopes", torch.tensor(slopes), persistent=False)
-        # Bias depends only on (seq_len, device), so it is memoized within an
-        # element budget; larger grids fall back to on-the-fly computation.
-        self._bias_cache: dict[tuple[int, str], torch.Tensor] = {}
+        # Bias depends only on (seq_len, device, dtype), so it is memoized
+        # within an element budget; larger grids fall back to on-the-fly
+        # computation.
+        self._bias_cache: dict[tuple[int, str, torch.dtype], torch.Tensor] = {}
 
     def _build_bias(self, seq_len: int, device: torch.device) -> torch.Tensor:
         """Build the ``(heads, seq_len, seq_len)`` ALiBi bias tensor."""
@@ -71,7 +72,9 @@ class ALiBiBias(BasePositionalEncoding):
         slopes = self.slopes
         assert isinstance(slopes, torch.Tensor)
         device = slopes.device
-        key = (seq_len, str(device))
+        # dtype is part of the key: the plain-dict cache is invisible to
+        # .half()/.float(), which re-cast the slopes buffer in place.
+        key = (seq_len, str(device), slopes.dtype)
         bias = self._bias_cache.get(key)
         if bias is None:
             bias = self._build_bias(seq_len, device)
