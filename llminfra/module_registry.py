@@ -27,6 +27,8 @@ from .attention.sparse_attention import (
 )
 from .positional import (
     BasePositionalEncoding,
+)
+from .positional import (
     build_positional_encoding as _build_positional_encoding,
 )
 

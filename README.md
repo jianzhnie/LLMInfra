@@ -22,7 +22,7 @@ components.
 - Inference infrastructure: paged KV caches, disk and tiered KV offload, paged
   attention, and block-sparse indexing.
 - Speculative decoding: standard draft verification, N-Gram, EAGLE 1-3,
-  Medusa, MTP, DSpark, and DSFlash reference interfaces.
+  Medusa, MTP, and DSpark (DSFlash-style) dynamic scheduling.
 - Quantization: portable fake INT4, INT8, FP8 quantization and QAT wrappers.
 
 The implementations prioritize clarity, explicit tensor shapes, numerical
@@ -104,7 +104,7 @@ output.sum().backward()
 | `llminfra/models/` | Language, encoder, encoder-decoder, and multimodal models |
 | `llminfra/moe/` | Routers, experts, and Mixture-of-Experts modules |
 | `llminfra/inference/` | KV caches, paging, offload, and sparse indexing |
-| `llminfra/speculative_decoding/` | N-Gram, EAGLE, Medusa, MTP, and DSFlash |
+| `llminfra/speculative_decoding/` | N-Gram, EAGLE, Medusa, MTP, and DSpark (DSFlash-style) |
 | `llminfra/quantization.py` | Fake quantization and QAT utilities |
 | `tests/` | Tests organized to mirror the source package |
 

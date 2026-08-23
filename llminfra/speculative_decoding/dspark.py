@@ -118,4 +118,3 @@ class DSparkDecoder(nn.Module):
             f"temperature={self.temperature}, "
             f"append_bonus_token={self.append_bonus_token}"
         )
-

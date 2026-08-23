@@ -22,7 +22,7 @@
   - **Compressed Sparse Attention** - 压缩 KV + 稀疏选择
   - **ALiBi Attention** - GQA + ALiBi additive bias
 - **位置编码与长上下文扩展**：RoPE、YaRN、Dynamic NTK、ALiBi
-- **推测解码**：N-Gram、EAGLE 1–3、Medusa、MTP、DSpark 与 DSFlash
+- **推测解码**：N-Gram、EAGLE 1–3、Medusa、MTP、DSpark(DSFlash 风格动态调度)
 - **MoE 模块**：Top-k Router、Expert FFN、Mixture-of-Experts、DeepSeek-style Shared Expert MoE、Expert Parallel MoE
 - **SSM 混合**：简化 Mamba2Layer
 - **稀疏索引与模型级模块**：Block Sparse Indexer、LatentMoE、Attention Residual、Multi-Token Prediction

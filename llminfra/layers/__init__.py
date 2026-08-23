@@ -5,8 +5,8 @@ from .feed_forward import FeedForward, SwiGLUFFN
 from .gated_feed_forward import ClampedSwiGLUFFN, GeGLUFFN, ReGLUFFN, build_feed_forward
 from .hybrid_layers import HybridLayerStack, HybridSSMBlock
 from .hyper_connection import ManifoldConstrainedHyperConnection
-from .normalization import DeepNorm, LayerNorm, LayerScale, RMSNorm
 from .mamba2 import Mamba2Layer, Mamba2State
+from .normalization import DeepNorm, LayerNorm, LayerScale, RMSNorm
 from .transformer_block import TransformerBlock
 
 __all__ = [
