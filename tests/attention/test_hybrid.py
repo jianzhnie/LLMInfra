@@ -9,7 +9,7 @@ import torch
 from helpers import make_hidden_state
 
 from llminfra import (
-    AlibiAttention,
+    ALiBiAttention,
     AttentionResidual,
     FlashMLA,
     HybridAttention,
@@ -71,7 +71,7 @@ def test_hybrid_attention_rejects_bad_intervals():
 
 
 def test_alibi_attention_shape_and_causal_weights():
-    layer = AlibiAttention(HIDDEN, HEADS, num_kv_groups=2)
+    layer = ALiBiAttention(HIDDEN, HEADS, num_kv_groups=2)
     x = make_hidden_state(BATCH, SEQ, HIDDEN)
     out, weights = layer(x, return_attention_weights=True)
     assert out.shape == x.shape

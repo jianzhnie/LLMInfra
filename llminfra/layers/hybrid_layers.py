@@ -18,7 +18,7 @@ from ..attention.linear_attention import LinearAttention
 from ..attention.multi_head_attention import MultiHeadAttention
 from .feed_forward import SwiGLUFFN
 from .normalization import RMSNorm
-from .state_space import Mamba2Layer, Mamba2State
+from .mamba2 import Mamba2Layer, Mamba2State
 
 VALID_TOKENS = ("ssm", "attn")
 HYBRID_LAYER_TYPES = ("linear", "ssm", "full")

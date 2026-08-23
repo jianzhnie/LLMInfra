@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 import torch
 
-from .base_position import BasePositionalEncoding
+from .base import BasePositionalEncoding
 from .rotary import (
     _MAX_CACHED_TABLE_ELEMENTS,
     RotaryPositionEmbedding,

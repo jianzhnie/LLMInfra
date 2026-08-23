@@ -7,7 +7,7 @@ import math
 import torch
 from torch import nn
 
-from .base_position import BasePositionalEncoding
+from .base import BasePositionalEncoding
 
 
 class NoPositionEncoding(BasePositionalEncoding):

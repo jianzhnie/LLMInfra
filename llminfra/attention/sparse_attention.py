@@ -387,11 +387,7 @@ class HierarchicalCompressedAttention(BaseAttention):
         )
 
 
-DeepSeekSparseAttention = DynamicSparseAttention
-
-
 __all__ = [
-    "DeepSeekSparseAttention",
     "DynamicSparseAttention",
     "HierarchicalCompressedAttention",
     "MiniMaxSparseAttention",

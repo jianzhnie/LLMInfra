@@ -7,8 +7,8 @@ from typing import Any
 import torch
 
 from .alibi import ALiBiBias
-from .base_position import BasePositionalEncoding
-from .classic_position import (
+from .base import BasePositionalEncoding
+from .classic import (
     LearnedAbsolutePositionEmbedding,
     NoPositionEncoding,
     SinusoidalPositionEmbedding,
@@ -26,7 +26,7 @@ from .rotary import RotaryPositionEmbedding
 from .two_dimensional import TwoDimensionalPositionEmbedding
 
 
-def get_positional_encoding(
+def build_positional_encoding(
     name: str,
     *,
     dim: int,
@@ -143,7 +143,7 @@ def get_positional_encoding(
 
 
 def list_positional_encodings() -> list[str]:
-    """Return canonical names accepted by :func:`get_positional_encoding`."""
+    """Return canonical names accepted by :func:`build_positional_encoding`."""
     return [
         "none",
         "learned",

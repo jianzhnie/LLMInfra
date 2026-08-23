@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from .base_position import BasePositionalEncoding
+from .base import BasePositionalEncoding
 
 
 class TwoDimensionalPositionEmbedding(BasePositionalEncoding):

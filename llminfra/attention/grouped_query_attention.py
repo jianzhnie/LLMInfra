@@ -179,7 +179,4 @@ class GroupedQueryAttention(BaseAttention):
         )
 
 
-# Preserve the historical spelling for downstream users.
-GroupQueryAttention = GroupedQueryAttention
-
-__all__ = ["GroupQueryAttention", "GroupedQueryAttention"]
+__all__ = ["GroupedQueryAttention"]

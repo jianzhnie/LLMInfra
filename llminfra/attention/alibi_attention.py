@@ -79,7 +79,4 @@ class ALiBiAttention(BaseAttention):
         return f"{super().extra_repr()}, num_kv_groups={self.num_kv_groups}"
 
 
-# Preserve the original spelling for downstream users.
-AlibiAttention = ALiBiAttention
-
-__all__ = ["ALiBiAttention", "AlibiAttention"]
+__all__ = ["ALiBiAttention"]

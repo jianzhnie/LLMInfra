@@ -31,7 +31,7 @@ from llminfra.layers.gated_feed_forward import ClampedSwiGLUFFN, GeGLUFFN
 from llminfra.layers.hybrid_layers import HybridLayerStack, HybridSSMBlock
 from llminfra.layers.hyper_connection import ManifoldConstrainedHyperConnection
 from llminfra.layers.normalization import LayerNorm, RMSNorm
-from llminfra.layers.state_space import Mamba2Layer
+from llminfra.layers.mamba2 import Mamba2Layer
 from llminfra.layers.transformer_block import TransformerBlock
 
 HIDDEN = 512

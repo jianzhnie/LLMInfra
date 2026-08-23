@@ -206,6 +206,4 @@ class KimiDeltaAttention(BaseAttention):
         )
 
 
-KDAAttention = KimiDeltaAttention
-
-__all__ = ["KDAAttention", "KimiDeltaAttention"]
+__all__ = ["KimiDeltaAttention"]

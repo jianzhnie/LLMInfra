@@ -15,8 +15,8 @@ from llminfra import (
     TieredKVCache,
     TopKRouter,
     build_multimodal_position_ids,
+    build_positional_encoding,
     distributed_ring_attention,
-    get_positional_encoding,
 )
 
 
@@ -109,7 +109,7 @@ def test_multimodal_position_ids_and_early_fusion():
 
 
 def test_longrope_reference_preset_factory():
-    encoding = get_positional_encoding(
+    encoding = build_positional_encoding(
         "longrope",
         dim=8,
         preset="reference_uniform_256k",

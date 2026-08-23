@@ -138,6 +138,33 @@ class CrossAttentionFuser(CrossAttention):
         )
 
 
+def _validate_image_grid(
+    image_grid_thw: torch.Tensor,
+    *,
+    expected_image_tokens: int | None = None,
+) -> int:
+    """Validate ``image_grid_thw`` and return the per-example token count.
+
+    Shared by :func:`build_multimodal_position_ids` and the cross-attention
+    fusion path of :class:`MultimodalCausalLM` so the two validation sites
+    cannot drift apart.
+    """
+    if image_grid_thw.dim() != 2 or image_grid_thw.size(-1) != 3:
+        raise ValueError("image_grid_thw must have shape (batch, 3)")
+    if (image_grid_thw < 1).any():
+        raise ValueError("all image grid dimensions must be >= 1")
+    token_counts = image_grid_thw.prod(dim=-1)
+    if not torch.equal(token_counts, token_counts[:1].expand_as(token_counts)):
+        raise ValueError("dense batches require equal image token counts")
+    image_tokens = int(token_counts[0].item())
+    if expected_image_tokens is not None and image_tokens != expected_image_tokens:
+        raise ValueError(
+            f"image grid produces {image_tokens} tokens, "
+            f"but vision_features contains {expected_image_tokens}"
+        )
+    return image_tokens
+
+
 def build_multimodal_position_ids(
     image_grid_thw: torch.Tensor,
     text_length: int,

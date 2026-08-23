@@ -12,7 +12,7 @@ from helpers import make_causal_mask, make_hidden_state
 from llminfra import (
     BlockSparseAttention,
     CompressedSparseAttention,
-    GroupQueryAttention,
+    GroupedQueryAttention,
     SlidingWindowAttention,
 )
 
@@ -62,7 +62,7 @@ def test_sliding_window_large_window_equals_gqa():
         dropout=0.0,
         causal=False,
     )
-    gqa = GroupQueryAttention(HIDDEN, HEADS, num_kv_groups=2, dropout=0.0)
+    gqa = GroupedQueryAttention(HIDDEN, HEADS, num_kv_groups=2, dropout=0.0)
     swa_full.load_state_dict(gqa.state_dict())
     swa_full.eval()
     gqa.eval()
@@ -119,7 +119,7 @@ def test_block_sparse_with_all_blocks_equals_causal_gqa():
         top_k=num_blocks,
         dropout=0.0,
     )
-    gqa = GroupQueryAttention(HIDDEN, HEADS, num_kv_groups=2, dropout=0.0)
+    gqa = GroupedQueryAttention(HIDDEN, HEADS, num_kv_groups=2, dropout=0.0)
     sparse.load_state_dict(gqa.state_dict())
     sparse.eval()
     gqa.eval()

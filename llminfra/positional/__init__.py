@@ -7,7 +7,7 @@ components referenced by mainstream attention architectures:
 - `scaling`: YaRN / dynamic-NTK / partial / interpolation / LongRoPE variants
 - `alibi`: Attention with Linear Biases (ALiBi)
 - `two_d`: two-dimensional block position embedding
-- `factory`: name-based `get_positional_encoding` factory
+- `factory`: name-based `build_positional_encoding` factory
 
 The implementations are intended for teaching and small-scale experiments.
 Production deployments should compare against the official kernels and
@@ -15,15 +15,15 @@ Transformers implementations, especially for exact YaRN coefficients.
 """
 
 from .alibi import ALiBiBias
-from .base_position import BasePositionalEncoding
-from .classic_position import (
+from .base import BasePositionalEncoding
+from .classic import (
     LearnedAbsolutePositionEmbedding,
     NoPositionEncoding,
     SinusoidalPositionEmbedding,
     T5RelativePositionBias,
 )
+from .factory import build_positional_encoding, list_positional_encodings
 from .multimodal_rope import MultiModalRotaryPositionEmbedding
-from .position_factory import get_positional_encoding, list_positional_encodings
 from .rope_scaling import (
     LONGROPE_PRESETS,
     DynamicNTKRotaryEmbedding,
@@ -58,8 +58,8 @@ __all__ = [
     "YaRNParameters",
     "YaRNScaledRotaryEmbedding",
     "apply_rotary_pos_emb",
+    "build_positional_encoding",
     "get_longrope_preset",
-    "get_positional_encoding",
     "list_positional_encodings",
     "register_longrope_preset",
 ]

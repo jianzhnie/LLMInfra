@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch
 
-from .base_position import BasePositionalEncoding
+from .base import BasePositionalEncoding
 
 
 class ALiBiBias(BasePositionalEncoding):

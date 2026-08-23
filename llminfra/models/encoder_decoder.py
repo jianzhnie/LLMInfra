@@ -25,6 +25,15 @@ from ..attention.multi_head_attention import MultiHeadAttention
 from ..layers.feed_forward import SwiGLUFFN
 from ..layers.normalization import RMSNorm
 
+#: Maximum number of cached ``(seq_len, device)`` causal masks. Caching makes
+#: mask construction O(1) on repeated sequence lengths, but each entry holds
+#: an O(seq^2) bool tensor on its device, so an unbounded cache could
+#: accumulate device memory across many distinct lengths. When the cap is
+#: exceeded the cache is simply rebuilt from scratch: the trade-off favors
+#: bounding memory over keeping a perfect hit rate for workloads that cycle
+#: through many sequence lengths.
+_MAX_CACHED_CAUSAL_MASKS = 8
+
 _CAUSAL_MASK_CACHE: dict[tuple[int, torch.device], torch.Tensor] = {}
 
 
@@ -35,11 +44,14 @@ def cached_causal_mask(seq_len: int, device: torch.device) -> torch.Tensor:
     forward; caching it per ``(seq_len, device)`` makes mask construction
     O(1). The cached tensor is treated as read-only: callers combine it with
     padding or prefix masks through logical ops that allocate fresh tensors,
-    and attention only reads it.
+    and attention only reads it. At most ``_MAX_CACHED_CAUSAL_MASKS`` entries
+    are kept; beyond that the cache is cleared and rebuilt.
     """
     key = (seq_len, device)
     mask = _CAUSAL_MASK_CACHE.get(key)
     if mask is None:
+        if len(_CAUSAL_MASK_CACHE) >= _MAX_CACHED_CAUSAL_MASKS:
+            _CAUSAL_MASK_CACHE.clear()
         mask = torch.tril(
             torch.ones(seq_len, seq_len, dtype=torch.bool, device=device)
         )[None, None]

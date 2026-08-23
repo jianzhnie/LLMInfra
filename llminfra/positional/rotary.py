@@ -6,7 +6,7 @@ from collections.abc import Callable
 
 import torch
 
-from .base_position import BasePositionalEncoding
+from .base import BasePositionalEncoding
 
 # Cap on cached cos/sin table elements (~16 MB per float32 table) so presets
 # with very large ``max_seq_len`` (e.g. LongRoPE 1M) do not explode memory.

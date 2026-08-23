@@ -20,8 +20,8 @@ from llminfra import (
     T5RelativePositionBias,
     TokenClassificationHead,
     build_attention,
+    build_positional_encoding,
     get_activation,
-    get_positional_encoding,
     list_attentions,
     list_positional_encodings,
     pool_hidden_state,
@@ -180,7 +180,7 @@ def test_sparse_variants_build_from_registry():
     assert isinstance(hca, HierarchicalCompressedAttention)
 
 
-def test_classic_position_modules_and_factory():
+def test_classic_modules_and_factory():
     hidden = torch.zeros(2, 4, 8)
     sinusoidal = SinusoidalPositionEmbedding(8, max_seq_len=8)
     output = sinusoidal(hidden)
@@ -195,14 +195,14 @@ def test_classic_position_modules_and_factory():
     nope = NoPositionEncoding(8, max_seq_len=8)
     assert nope(hidden) is hidden
     assert isinstance(
-        get_positional_encoding("learned", dim=8, max_seq_len=8),
+        build_positional_encoding("learned", dim=8, max_seq_len=8),
         LearnedAbsolutePositionEmbedding,
     )
     assert isinstance(
-        get_positional_encoding("sinusoidal", dim=8, max_seq_len=8),
+        build_positional_encoding("sinusoidal", dim=8, max_seq_len=8),
         SinusoidalPositionEmbedding,
     )
-    assert get_activation("gelu_erf") is not None
+    assert get_activation("gelu_exact") is not None
     torch.testing.assert_close(
         get_activation("swish")(hidden),
         get_activation("silu")(hidden),
@@ -221,7 +221,7 @@ def test_t5_relative_position_bias_supports_cross_attention_lengths():
     values.sum().backward()
     assert bias.relative_attention_bias.weight.grad is not None
     assert isinstance(
-        get_positional_encoding(
+        build_positional_encoding(
             "t5_bias",
             dim=8,
             num_heads=4,

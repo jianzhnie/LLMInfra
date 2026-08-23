@@ -6,7 +6,7 @@ from collections.abc import Sequence
 
 import torch
 
-from .base_position import BasePositionalEncoding
+from .base import BasePositionalEncoding
 from .rotary import _default_inv_freq, apply_rotary_pos_emb
 
 

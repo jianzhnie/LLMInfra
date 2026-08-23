@@ -11,7 +11,7 @@ from llminfra.flash_attention import (
     list_versions,
 )
 from llminfra.flash_attention.common import FlashAttentionConfig
-from llminfra.flash_attention.script_utils import validate_fp8_support
+from llminfra.flash_attention.fp8_support import validate_fp8_support
 
 CONFIG = FlashAttentionConfig(block_size_q=8, block_size_kv=8)
 VERSIONS = list_versions()

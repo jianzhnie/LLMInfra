@@ -14,7 +14,7 @@ import torch.nn.functional as F
 from helpers import make_causal_mask, make_hidden_state, make_padding_mask, make_qkv
 
 from llminfra import (
-    GroupQueryAttention,
+    GroupedQueryAttention,
     MultiHeadAttention,
     MultiHeadLatentAttention,
     MultiQueryAttention,
@@ -29,7 +29,7 @@ SEQ = 7
 
 MODULE_FACTORIES = {
     "mha": lambda: MultiHeadAttention(HIDDEN, HEADS, dropout=0.0),
-    "gqa": lambda: GroupQueryAttention(HIDDEN, HEADS, num_kv_groups=2, dropout=0.0),
+    "gqa": lambda: GroupedQueryAttention(HIDDEN, HEADS, num_kv_groups=2, dropout=0.0),
     "mqa": lambda: MultiQueryAttention(HIDDEN, HEADS, dropout=0.0),
     "mla": lambda: MultiHeadLatentAttention(
         HIDDEN, HEADS, q_latent_size=16, kv_latent_size=24, dropout=0.0
@@ -118,20 +118,20 @@ def test_constructor_rejects_indivisible_hidden_size():
     with pytest.raises(ValueError, match="divisible"):
         MultiQueryAttention(30, HEADS)
     with pytest.raises(ValueError, match="divisible"):
-        GroupQueryAttention(30, HEADS, num_kv_groups=1)
+        GroupedQueryAttention(30, HEADS, num_kv_groups=1)
     with pytest.raises(ValueError, match="divisible"):
         MultiHeadLatentAttention(30, HEADS, q_latent_size=8, kv_latent_size=8)
 
 
 def test_gqa_rejects_indivisible_groups():
     with pytest.raises(ValueError, match="divisible"):
-        GroupQueryAttention(HIDDEN, HEADS, num_kv_groups=3)
+        GroupedQueryAttention(HIDDEN, HEADS, num_kv_groups=3)
 
 
 def test_gqa_with_full_groups_equals_mha():
     """GQA with num_kv_groups == num_heads must reduce to exact MHA."""
     mha = MultiHeadAttention(HIDDEN, HEADS, dropout=0.0)
-    gqa = GroupQueryAttention(HIDDEN, HEADS, num_kv_groups=HEADS, dropout=0.0)
+    gqa = GroupedQueryAttention(HIDDEN, HEADS, num_kv_groups=HEADS, dropout=0.0)
     gqa.load_state_dict(mha.state_dict())
     mha.eval()
     gqa.eval()
@@ -143,7 +143,7 @@ def test_gqa_with_full_groups_equals_mha():
 def test_gqa_with_single_group_equals_mqa():
     """GQA with num_kv_groups == 1 must reduce to exact MQA."""
     mqa = MultiQueryAttention(HIDDEN, HEADS, dropout=0.0)
-    gqa = GroupQueryAttention(HIDDEN, HEADS, num_kv_groups=1, dropout=0.0)
+    gqa = GroupedQueryAttention(HIDDEN, HEADS, num_kv_groups=1, dropout=0.0)
     gqa.load_state_dict(mqa.state_dict())
     mqa.eval()
     gqa.eval()

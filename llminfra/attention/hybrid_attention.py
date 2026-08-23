@@ -3,7 +3,7 @@
 Models such as Qwen3-Next and Kimi Linear interleave a majority of linear
 attention layers with a small number of full attention layers. This module
 provides a simple routing wrapper around ``LinearAttention`` and
-``GroupQueryAttention`` so a transformer can select the layer type by index.
+``GroupedQueryAttention`` so a transformer can select the layer type by index.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from typing import cast
 import torch
 
 from .base_attention import BaseAttention, validate_attention_inputs
-from .grouped_query_attention import GroupQueryAttention
+from .grouped_query_attention import GroupedQueryAttention
 from .linear_attention import LinearAttention
 
 
@@ -55,7 +55,7 @@ class HybridAttention(BaseAttention):
             dropout=dropout,
             bias=bias,
         )
-        self.full_attention = GroupQueryAttention(
+        self.full_attention = GroupedQueryAttention(
             hidden_size,
             num_heads,
             num_kv_groups=num_heads if num_kv_groups is None else num_kv_groups,

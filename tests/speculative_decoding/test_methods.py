@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from llminfra import (
-    DSFlashDecoder,
+    DSparkDecoder,
     DSparkScheduler,
     Eagle1Speculator,
     Eagle2Speculator,
@@ -158,10 +158,10 @@ def test_eagle_speculator_and_versioned_interfaces() -> None:
         assert (output[:, 4:] == 2).all()
 
 
-def test_dsflash_uses_dynamic_scheduler() -> None:
+def test_dspark_uses_dynamic_scheduler() -> None:
     model = _fixed_token_model(1, vocab_size=8)
     input_ids = torch.zeros(1, 3, dtype=torch.long)
-    decoder = DSFlashDecoder(model, model, DSparkScheduler((2,)))
+    decoder = DSparkDecoder(model, model, DSparkScheduler((2,)))
     assert decoder(input_ids).size(1) >= input_ids.size(1)
 
 

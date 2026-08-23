@@ -27,7 +27,7 @@ from .attention.sparse_attention import (
 )
 from .positional import (
     BasePositionalEncoding,
-    get_positional_encoding,
+    build_positional_encoding as _build_positional_encoding,
 )
 
 ATTENTION_REGISTRY: dict[str, type[BaseAttention]] = {
@@ -93,7 +93,7 @@ def build_positional_encoding(
     **kwargs: object,
 ) -> BasePositionalEncoding:
     """Build a positional encoding module by name."""
-    return get_positional_encoding(
+    return _build_positional_encoding(
         name,
         dim=dim,
         num_heads=num_heads,

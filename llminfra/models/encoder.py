@@ -10,7 +10,7 @@ from torch import nn
 
 from ..layers.normalization import LayerNorm, RMSNorm
 from ..module_registry import build_positional_encoding
-from ..positional.classic_position import (
+from ..positional.classic import (
     LearnedAbsolutePositionEmbedding,
     SinusoidalPositionEmbedding,
 )

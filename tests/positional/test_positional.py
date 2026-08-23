@@ -2,7 +2,7 @@
 
 Covers RoPE (and ``apply_rotary_pos_emb``), YaRN, dynamic NTK, partial RoPE,
 position interpolation, LongRoPE, 2D position embedding, the ALiBi bias and
-the ``get_positional_encoding`` factory.
+the ``build_positional_encoding`` factory.
 """
 
 import math
@@ -23,7 +23,7 @@ from llminfra import (
     YaRNParameters,
     YaRNScaledRotaryEmbedding,
     apply_rotary_pos_emb,
-    get_positional_encoding,
+    build_positional_encoding,
 )
 
 
@@ -172,19 +172,19 @@ def test_two_dimensional_position_embedding_rejects_negative_ids():
 
 
 def test_positional_encoding_factory():
-    assert isinstance(get_positional_encoding("rope", dim=8), RotaryPositionEmbedding)
-    assert isinstance(get_positional_encoding("alibi", dim=8, num_heads=4), ALiBiBias)
+    assert isinstance(build_positional_encoding("rope", dim=8), RotaryPositionEmbedding)
+    assert isinstance(build_positional_encoding("alibi", dim=8, num_heads=4), ALiBiBias)
     with pytest.raises(ValueError, match="Unknown"):
-        get_positional_encoding("unknown", dim=8)
+        build_positional_encoding("unknown", dim=8)
 
 
 def test_positional_factory_new_modes():
     assert isinstance(
-        get_positional_encoding("partial_rope", dim=8, partial_rotary_factor=0.5),
+        build_positional_encoding("partial_rope", dim=8, partial_rotary_factor=0.5),
         PartialRotaryPositionEmbedding,
     )
     assert isinstance(
-        get_positional_encoding(
+        build_positional_encoding(
             "interpolation",
             dim=8,
             original_max_position_embeddings=2048,
@@ -192,18 +192,18 @@ def test_positional_factory_new_modes():
         PositionInterpolation,
     )
     assert isinstance(
-        get_positional_encoding("mrope", dim=8, mrope_section=(1, 1, 2)),
+        build_positional_encoding("mrope", dim=8, mrope_section=(1, 1, 2)),
         MultiModalRotaryPositionEmbedding,
     )
 
 
 def test_positional_factory_2d_rejects_extra_kwargs():
     assert isinstance(
-        get_positional_encoding("2d", dim=8, max_blocks=4, max_positions_per_block=4),
+        build_positional_encoding("2d", dim=8, max_blocks=4, max_positions_per_block=4),
         TwoDimensionalPositionEmbedding,
     )
     with pytest.raises(ValueError, match="unsupported 2d"):
-        get_positional_encoding(
+        build_positional_encoding(
             "2d", dim=8, max_blocks=4, max_positions_per_block=4, dropout=0.1
         )
 

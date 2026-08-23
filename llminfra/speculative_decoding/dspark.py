@@ -119,6 +119,3 @@ class DSparkDecoder(nn.Module):
             f"append_bonus_token={self.append_bonus_token}"
         )
 
-
-class DSFlashDecoder(DSparkDecoder):
-    """DSFlash-compatible name for dynamically scheduled decoding."""
