@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -15,6 +16,7 @@ from ..layers.transformer_block import TransformerBlock
 from ..module_registry import build_attention, build_positional_encoding
 from ..moe import DeepSeekMoE
 from ..positional.multimodal_rope import MultiModalRotaryPositionEmbedding
+from ..speculative_decoding.base import SpeculativeDecoder
 from ..speculative_decoding.mtp import MultiTokenPredictionHead, mtp_loss
 from .encoder_decoder import cached_causal_mask
 
@@ -27,6 +29,26 @@ class CausalLMOutput:
     loss: torch.Tensor | None = None
     attention_weights: torch.Tensor | None = None
     mtp_logits: list[torch.Tensor] | None = None
+
+
+@dataclass
+class GenerateOutput:
+    """Structured result of :meth:`CausalLMModel.generate`.
+
+    Attributes:
+        sequences: Prompt ids concatenated with the generated tokens, shaped
+            ``(batch, prompt_len + num_generated)``. Rows stopped early by
+            ``eos_token_id`` are right-padded with ``pad_token_id``.
+        num_drafted: Total draft tokens proposed by ``draft_model``. Zero
+            when no draft model was used.
+        num_accepted: Total draft tokens accepted during verification.
+            Zero when no draft model was used.
+
+    """
+
+    sequences: torch.Tensor
+    num_drafted: int = 0
+    num_accepted: int = 0
 
 
 class CausalLMModel(nn.Module):
@@ -365,6 +387,149 @@ class CausalLMModel(nn.Module):
             return logits, last_weights
         return logits
 
+    @torch.no_grad()
+    def generate(
+        self,
+        input_ids: torch.Tensor,
+        max_new_tokens: int = 20,
+        temperature: float = 0.0,
+        eos_token_id: int | None = None,
+        pad_token_id: int = 0,
+        draft_model: Callable[[torch.Tensor], torch.Tensor] | None = None,
+        num_speculative_tokens: int = 4,
+    ) -> GenerateOutput:
+        """Generate tokens autoregressively from a prompt.
+
+        This is a teaching API: every step recomputes the full forward pass
+        over the whole sequence (these are reference implementations with no
+        KV cache), so generation is quadratic in the total sequence length.
+        It is meant for small experiments, not for serving.
+
+        Args:
+            input_ids: Prompt token ids of shape ``(batch, prompt_len)``.
+            max_new_tokens: Maximum number of tokens to generate per row.
+            temperature: Sampling temperature; the default 0 selects greedy
+                argmax decoding.
+            eos_token_id: Optional stop token. A row stops right after
+                emitting it; all remaining positions in that row are filled
+                with ``pad_token_id``.
+            pad_token_id: Token used to fill row positions after
+                ``eos_token_id``.
+            draft_model: Optional callable mapping ``(batch, seq)`` ids to
+                logits. When given, each step runs through
+                :class:`SpeculativeDecoder`: the draft model proposes
+                ``num_speculative_tokens`` tokens and this model verifies
+                them. Draft/accept counts are reported on the returned
+                output. With greedy decoding and a draft identical to the
+                target, the generated tokens match plain greedy decoding
+                exactly (speculative decoding is lossless).
+            num_speculative_tokens: Draft tokens proposed per speculative
+                step. Only used when ``draft_model`` is given.
+
+        Returns:
+            A :class:`GenerateOutput` whose ``sequences`` have shape
+            ``(batch, prompt_len + num_generated)`` with
+            ``num_generated <= max_new_tokens``.
+
+        Raises:
+            ValueError: If the arguments are inconsistent or the requested
+                generation would exceed ``max_seq_len``.
+
+        """
+        if input_ids.dim() != 2:
+            raise ValueError("input_ids must have shape (batch, seq_len)")
+        if input_ids.size(1) < 1:
+            raise ValueError("input_ids must contain at least one token")
+        if max_new_tokens < 1:
+            raise ValueError("max_new_tokens must be >= 1")
+        if temperature < 0:
+            raise ValueError("temperature must be >= 0")
+        prompt_len = input_ids.size(1)
+        # The final forward pass sees the prompt plus every generated token
+        # except the last one; a speculative step additionally appends the
+        # whole draft block before verification trims it.
+        worst_case_len = (
+            prompt_len
+            + max_new_tokens
+            - 1
+            + (num_speculative_tokens if draft_model is not None else 1)
+        )
+        if worst_case_len > self.max_seq_len:
+            raise ValueError(
+                f"generation could reach length {worst_case_len}, which "
+                f"exceeds max_seq_len {self.max_seq_len}"
+            )
+
+        decoder: SpeculativeDecoder | None = None
+        if draft_model is not None:
+            decoder = SpeculativeDecoder(
+                draft_model=draft_model,
+                target_model=self,
+                num_speculative_tokens=num_speculative_tokens,
+                temperature=temperature,
+                pad_token_id=pad_token_id,
+            )
+
+        sequences = input_ids
+        num_drafted = 0
+        num_accepted = 0
+        while sequences.size(1) - prompt_len < max_new_tokens:
+            if decoder is None:
+                logits = self(sequences)[:, -1]
+                next_token = self._sample_token(logits, temperature)
+                sequences = torch.cat([sequences, next_token[:, None]], dim=-1)
+            else:
+                sequences = decoder(sequences)
+                num_drafted += decoder.last_num_drafted
+                num_accepted += decoder.last_num_accepted
+            sequences = sequences[:, : prompt_len + max_new_tokens]
+            if eos_token_id is None:
+                continue
+            sequences, all_finished = self._mask_after_eos(
+                sequences, prompt_len, eos_token_id, pad_token_id
+            )
+            if bool(all_finished):
+                break
+        return GenerateOutput(
+            sequences=sequences,
+            num_drafted=num_drafted,
+            num_accepted=num_accepted,
+        )
+
+    @staticmethod
+    def _sample_token(logits: torch.Tensor, temperature: float) -> torch.Tensor:
+        """Pick the next token from ``(batch, vocab)`` logits."""
+        if temperature <= 0.0:
+            return torch.argmax(logits, dim=-1)
+        probabilities = torch.softmax(logits / temperature, dim=-1)
+        return torch.multinomial(probabilities, 1).squeeze(-1)
+
+    @staticmethod
+    def _mask_after_eos(
+        sequences: torch.Tensor,
+        prompt_len: int,
+        eos_token_id: int,
+        pad_token_id: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Pad everything after the first eos in each row's generated part.
+
+        Returns the masked sequences and a scalar bool tensor that is True
+        when every row has emitted eos. Because the mask is reapplied after
+        every step, rows that already finished keep receiving ``pad_token_id``
+        while the rest of the batch continues.
+        """
+        generated = sequences[:, prompt_len:]
+        is_eos = generated == eos_token_id
+        # cumsum minus the position's own flag counts eos occurrences strictly
+        # before each position, i.e. marks everything after the first eos.
+        eos_counts = is_eos.long().cumsum(dim=1)
+        after_first_eos = (eos_counts - is_eos.long()) > 0
+        generated = generated.masked_fill(after_first_eos, pad_token_id)
+        return (
+            torch.cat([sequences[:, :prompt_len], generated], dim=-1),
+            is_eos.any(dim=1).all(),
+        )
+
     @staticmethod
     def _build_mask(
         attention_mask: torch.Tensor | None,
@@ -463,4 +628,4 @@ class PrefixLMModel(CausalLMModel):
         )
 
 
-__all__ = ["CausalLMModel", "CausalLMOutput", "PrefixLMModel"]
+__all__ = ["CausalLMModel", "CausalLMOutput", "GenerateOutput", "PrefixLMModel"]

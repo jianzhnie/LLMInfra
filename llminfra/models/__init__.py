@@ -14,7 +14,7 @@ from .heads import (
     TokenClassificationHead,
     pool_hidden_state,
 )
-from .language import CausalLMModel, CausalLMOutput, PrefixLMModel
+from .language import CausalLMModel, CausalLMOutput, GenerateOutput, PrefixLMModel
 from .multimodal import (
     CrossAttentionFuser,
     MultimodalCausalLM,
@@ -34,6 +34,7 @@ __all__ = [
     "EncoderDecoderModel",
     "EncoderOnlyModel",
     "EncoderOutput",
+    "GenerateOutput",
     "MultimodalCausalLM",
     "MultimodalCausalLMOutput",
     "PrefixLMModel",
