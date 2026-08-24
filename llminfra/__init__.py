@@ -4,9 +4,15 @@ The package is organized into subpackages by role:
 
 - `attention`: classic, sparse, linear and hybrid attention variants
 - `flash_attention`: educational FlashAttention v1-v4 implementations
+- `positional`: absolute, relative, rotary and long-context position encodings
 - `layers`: FFN / norm / SSM / transformer block layers
 - `moe`: Mixture-of-Experts components
-- `inference`: KV cache, paging and decoding utilities
+- `inference`: KV cache, paging and offload utilities
+- `models`: encoder, decoder, language and multimodal models
+- `speculative_decoding`: N-Gram, EAGLE, Medusa, MTP and DSpark decoding
+
+`quantization` provides fake-quantization/QAT wrappers and
+`module_registry` the public `build_*` / `list_*` factories.
 
 All public names are re-exported here, so ``from llminfra import X`` works
 regardless of the internal layout.

@@ -93,7 +93,7 @@ def bench_fake_quantizer() -> None:
 
 
 def _make_block(hidden: int = 512, layers: int = 2) -> nn.Module:
-    """Small transformer-style block: attention-mixing + MLP, in Linear form."""
+    """Small transformer-style block: stacked MLPs in Linear form."""
     mods: list[nn.Module] = []
     for _ in range(layers):
         mods += [

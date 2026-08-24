@@ -6,7 +6,7 @@ Measures wall time for the hot paths of `llminfra.inference`:
 - ``PagedAttentionCache.get`` (dense gather of a cached sequence)
 - ``paged_attention`` (prefill and decode query shapes)
 - ``BlockSparseIndexer.forward`` (batched top-k block selection)
-- ``TieredKVCache.put/get`` (HBM hit and CPU-tier promotion)
+- ``TieredKVCache.put/get`` (bulk put with evictions, CPU-tier promotion)
 
 Timings are medians over an adaptively chosen number of repeats. Run from
 the repository root:
@@ -16,6 +16,7 @@ the repository root:
 
 from __future__ import annotations
 
+import itertools
 import statistics
 import sys
 import tempfile
@@ -115,29 +116,32 @@ def _bench_indexer(batch: int, seq_len: int, hidden: int, block_size: int) -> fl
 
 
 def _bench_tiered(num_entries: int, seq_len: int) -> tuple[float, float]:
-    tmpdir = tempfile.mkdtemp(prefix="llminfra_bench_kv_")
-    cache = TieredKVCache(
-        tmpdir,
-        max_hbm_entries=num_entries // 2,
-        max_cpu_entries=num_entries,
-        hbm_device="cpu",
-    )
-    tensors = [
-        (
-            torch.randn(seq_len, NUM_HEADS, HEAD_DIM),
-            torch.randn(seq_len, NUM_HEADS, HEAD_DIM),
+    with tempfile.TemporaryDirectory(prefix="llminfra_bench_kv_") as tmpdir:
+        cache = TieredKVCache(
+            tmpdir,
+            max_hbm_entries=num_entries // 2,
+            max_cpu_entries=num_entries,
+            hbm_device="cpu",
         )
-        for _ in range(num_entries)
-    ]
+        tensors = [
+            (
+                torch.randn(seq_len, NUM_HEADS, HEAD_DIM),
+                torch.randn(seq_len, NUM_HEADS, HEAD_DIM),
+            )
+            for _ in range(num_entries)
+        ]
 
-    def put_all() -> None:
-        for seq_id, (key, value) in enumerate(tensors):
-            cache.put(seq_id, key, value)
+        def put_all() -> None:
+            for seq_id, (key, value) in enumerate(tensors):
+                cache.put(seq_id, key, value)
 
-    put_all()
-    put_ms = _median_time(put_all)
-    get_ms = _median_time(lambda: cache.get(0))  # HBM/CPU promotion path
-    return put_ms, get_ms
+        put_all()
+        put_ms = _median_time(put_all)
+        # Cycle through every entry: HBM holds only half of them, so each
+        # timed get forces a CPU-tier promotion instead of an HBM hit.
+        get_order = itertools.cycle(range(num_entries))
+        get_ms = _median_time(lambda: cache.get(next(get_order)))
+        return put_ms, get_ms
 
 
 def _median_time(fn: Callable[[], None], budget_seconds: float = 0.5) -> float:

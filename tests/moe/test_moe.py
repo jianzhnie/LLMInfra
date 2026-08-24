@@ -114,6 +114,25 @@ def test_load_balance_loss_is_finite():
     assert torch.isfinite(loss)
 
 
+def test_load_balance_loss_matches_hand_computed_value():
+    """The loss must equal num_experts * sum(fraction * mean_softmax)."""
+    logits = torch.tensor([[2.0, 0.0, -1.0, 0.5], [0.0, 1.0, 0.0, 2.0]])
+    indices = torch.tensor([[0, 1], [1, 1]])  # fractions: 1/4, 3/4, 0, 0
+    loss = load_balance_loss(logits, indices, num_experts=4)
+
+    probabilities = torch.softmax(logits, dim=-1).mean(dim=0)
+    fractions = torch.tensor([0.25, 0.75, 0.0, 0.0])
+    expected = 4 * (fractions * probabilities).sum()
+    torch.testing.assert_close(loss, expected)
+
+    # Perfectly balanced routing with uniform probabilities gives exactly 1.
+    uniform = torch.zeros(8, 4)
+    balanced = torch.arange(4).repeat(2).reshape(4, 2).T.contiguous()
+    torch.testing.assert_close(
+        load_balance_loss(uniform, balanced, num_experts=4), torch.tensor(1.0)
+    )
+
+
 def test_load_balance_loss_empty_tokens():
     """Zero tokens must give a finite zero loss, not NaN."""
     logits = torch.empty(0, 8)

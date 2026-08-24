@@ -1,8 +1,8 @@
 """CPU benchmark for the ``llminfra.attention`` modules.
 
 Measures forward wall time for the core attention classes across a shape
-matrix covering typical prefill/decode sizes (batch 2-8, seq 128-2048,
-hidden 256-1024). Timings are medians over an adaptively chosen number of
+matrix covering typical prefill/decode sizes (batch 1-4, seq 128-2048,
+hidden 256-512). Timings are medians over an adaptively chosen number of
 repeats. Run from the repository root:
 
     python examples/bench_attention.py

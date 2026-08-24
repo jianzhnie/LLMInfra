@@ -284,6 +284,65 @@ def test_transformer_block_only_builds_norms_used_by_the_style():
     assert post_parallel(x).shape == x.shape
 
 
+_VALID_BLOCK_COMBOS = [
+    (style, parallel, attention_residual)
+    for style in ("pre", "post", "sandwich", "deepnorm")
+    for parallel in (False, True)
+    for attention_residual in (False, True)
+    if not (style == "deepnorm" and attention_residual)
+]
+
+
+@pytest.mark.parametrize(
+    ("norm_style", "parallel", "attention_residual"), _VALID_BLOCK_COMBOS
+)
+def test_transformer_block_every_layout_combination(
+    norm_style, parallel, attention_residual
+):
+    """Every documented norm_style x parallel x residual combo must forward."""
+    block = TransformerBlock(
+        HIDDEN,
+        HEADS,
+        intermediate_size=64,
+        norm_style=norm_style,
+        parallel=parallel,
+        attention_residual=attention_residual,
+    )
+    x = make_hidden_state(BATCH, SEQ, HIDDEN)
+    output = block(x)
+    assert output.shape == x.shape
+    assert torch.isfinite(output).all()
+
+
+@pytest.mark.parametrize("norm_style", ["pre", "post", "sandwich"])
+def test_transformer_block_manifold_hyper_connection_combinations(norm_style):
+    block = TransformerBlock(
+        HIDDEN,
+        HEADS,
+        intermediate_size=64,
+        norm_style=norm_style,
+        manifold_hyper_connection=True,
+    )
+    x = make_hidden_state(BATCH, SEQ, HIDDEN)
+    output = block(x)
+    assert output.shape == x.shape
+    assert torch.isfinite(output).all()
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"norm_style": "deepnorm", "attention_residual": True},
+        {"manifold_hyper_connection": True, "attention_residual": True},
+        {"norm_style": "deepnorm", "manifold_hyper_connection": True},
+        {"parallel": True, "manifold_hyper_connection": True},
+    ],
+)
+def test_transformer_block_impossible_combinations_raise(kwargs):
+    with pytest.raises(ValueError, match=r"combin|deepnorm|sequential"):
+        TransformerBlock(HIDDEN, HEADS, intermediate_size=64, **kwargs)
+
+
 def test_mamba2_chunked_scan_matches_recurrent():
     layer = Mamba2Layer(HIDDEN, d_state=8).eval()
     x = make_hidden_state(BATCH, SEQ, HIDDEN)
@@ -353,6 +412,38 @@ def test_hybrid_layer_stack_full_attention_is_causal_by_default():
     perturbed = x.clone()
     perturbed[:, -1] += 1.0
     torch.testing.assert_close(stack(x)[:, :-1], stack(perturbed)[:, :-1])
+
+
+@pytest.mark.parametrize(
+    "layer_map",
+    ["linear", "ssm", "full", "attn", "linear:ssm:full"],
+)
+def test_hybrid_layer_stack_every_layer_map_token(layer_map):
+    stack = HybridLayerStack(
+        hidden_size=HIDDEN,
+        num_heads=HEADS,
+        intermediate_size=64,
+        layer_map=layer_map,
+    )
+    x = make_hidden_state(BATCH, SEQ, HIDDEN)
+    output, states = stack(x, return_state=True)
+    assert output.shape == x.shape
+    assert torch.isfinite(output).all()
+    # Only ssm positions produce a state; "attn" is an alias for "full".
+    expected = [token == "ssm" for token in stack.layer_map]
+    assert [state is not None for state in states] == expected
+    if layer_map == "attn":
+        assert stack.layer_map == ("full",)
+
+
+def test_hybrid_layer_stack_rejects_unknown_tokens():
+    with pytest.raises(ValueError, match="unknown layer types"):
+        HybridLayerStack(
+            hidden_size=HIDDEN,
+            num_heads=HEADS,
+            intermediate_size=64,
+            layer_map="linear:bogus",
+        )
 
 
 def test_hybrid_ssm_block_string_and_list_patterns_match():

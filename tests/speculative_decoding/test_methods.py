@@ -282,3 +282,54 @@ def test_mtp_loss_reuses_precomputed_logits(monkeypatch) -> None:
     )
     actual = mtp_loss(head, hidden, labels, logits_list=logits_list)
     torch.testing.assert_close(actual, expected)
+
+
+def test_mtp_loss_scores_each_head_against_its_shifted_labels() -> None:
+    """Head k must be scored against labels[:, k + 1:] (off-by-one guard)."""
+    head = MultiTokenPredictionHead(HIDDEN_SIZE, vocab_size=32, num_predictions=2)
+    hidden = torch.randn(2, 7, HIDDEN_SIZE)
+    labels = torch.randint(0, 32, (2, 7))
+    logits_list = head(hidden)
+
+    per_step = [
+        torch.nn.functional.cross_entropy(
+            logits_list[k][:, : -(k + 1)].reshape(-1, 32),
+            labels[:, k + 1 :].reshape(-1),
+        )
+        for k in range(2)
+    ]
+    expected = torch.stack(per_step).mean()
+    torch.testing.assert_close(mtp_loss(head, hidden, labels), expected)
+
+
+def test_medusa_loss_matches_aligned_weighted_cross_entropy() -> None:
+    """Head h predicts labels[:, h + 1:]; steps are weighted by decay**h."""
+    head = MedusaHead(HIDDEN_SIZE, vocab_size=32, num_heads=3)
+    hidden = torch.randn(2, 7, HIDDEN_SIZE)
+    labels = torch.randint(0, 32, (2, 7))
+    logits = head(hidden)
+
+    total, weight_sum = 0.0, 0.0
+    for h in range(3):
+        offset = h + 1
+        weight = 0.8**h
+        total = total + weight * torch.nn.functional.cross_entropy(
+            logits[:, :-offset, h].reshape(-1, 32), labels[:, offset:].reshape(-1)
+        )
+        weight_sum += weight
+    expected = total / weight_sum
+    torch.testing.assert_close(
+        medusa_loss(head, hidden, labels, weight_decay=0.8), expected
+    )
+
+    # Branches whose targets are all -100 contribute no weight.
+    masked_labels = labels.clone()
+    masked_labels[:, 2:] = -100
+    expected_head0 = torch.nn.functional.cross_entropy(
+        logits[:, :-1, 0].reshape(-1, 32),
+        masked_labels[:, 1:].reshape(-1),
+        ignore_index=-100,
+    )
+    torch.testing.assert_close(
+        medusa_loss(head, hidden, masked_labels, weight_decay=0.8), expected_head0
+    )

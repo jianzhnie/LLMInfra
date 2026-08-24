@@ -26,6 +26,15 @@ def test_int4_has_fewer_levels_than_int8():
     assert int4.unique().numel() < int8.unique().numel()
 
 
+@pytest.mark.parametrize(("mode", "qmax"), [("int4", 7), ("int8", 127)])
+def test_symmetric_integer_quantization_respects_error_bound(mode: str, qmax: int):
+    """Round-to-nearest with scale = max_abs / qmax must err by <= scale / 2."""
+    x = torch.randn(64, generator=torch.Generator().manual_seed(0)) * 3
+    quantized = FakeQuantizer(QuantizationConfig(mode=mode))(x)
+    scale = x.abs().max() / qmax
+    assert (quantized - x).abs().max() <= scale / 2 + 1e-6
+
+
 def test_qat_wrapper_quantizes_module_without_mutating_parameters():
     module = nn.Linear(8, 4)
     original = module.weight.detach().clone()

@@ -41,6 +41,7 @@ from .flash_attention_v3 import flash_attention_v3
 from .flash_attention_v4 import flash_attention_v4
 
 __all__ = [
+    "ATTENTION_FN_REGISTRY",
     "VERSION_REGISTRY",
     "FlashAttention",
     "FlashAttentionConfig",

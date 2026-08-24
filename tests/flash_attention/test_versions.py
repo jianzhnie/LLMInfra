@@ -241,7 +241,8 @@ def test_fa4_correction_rescales_for_large_max_increase():
     # block_max 20 vs running max 10: beyond the threshold, full rescale path.
     _, _, row_max, rescaled = _correction_merge_for(20.0)
     assert rescaled.all().item()
-    assert (row_max >= 10.0).all()
+    # The merged row max must take the new block max exactly.
+    torch.testing.assert_close(row_max, torch.tensor([[[[20.0]]]]))
 
 
 def test_fa4_correction_initializes_empty_state():

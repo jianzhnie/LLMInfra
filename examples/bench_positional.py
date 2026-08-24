@@ -1,7 +1,7 @@
 """CPU benchmark for the positional encoding modules.
 
 Measures forward wall time for every positional module across realistic
-shapes (batch 2-8, seq 128-2048, hidden 256-1024). Each module is called
+shapes (batch 2-4, seq 512-2048, hidden 512). Each module is called
 ``LAYERS`` times per timed iteration to mimic a multi-layer model reusing
 one module instance per layer stack.
 

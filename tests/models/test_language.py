@@ -105,6 +105,39 @@ def test_causal_lm_with_alibi():
     assert logits.shape == (2, 6, 32)
 
 
+def test_causal_lm_with_ring_attention():
+    """RingAttention masks causally on its own, so the model omits the mask."""
+    model = CausalLMModel(
+        vocab_size=32,
+        hidden_size=16,
+        num_layers=1,
+        num_heads=2,
+        intermediate_size=32,
+        attention_name="ring",
+    )
+    input_ids = torch.randint(0, 32, (2, 6))
+    output = model(input_ids, labels=input_ids.clone(), return_dict=True)
+    assert output.logits.shape == (2, 6, 32)
+    assert torch.isfinite(output.loss).all()
+    # Padding masks are not supported by ring attention and must surface the
+    # attention module's own error instead of being silently dropped.
+    with pytest.raises(ValueError, match="RingAttention"):
+        model(input_ids, attention_mask=torch.ones(2, 6, dtype=torch.bool))
+
+
+def test_causal_lm_rejects_t5_bias_positional():
+    """t5_bias is a score bias with no causal-attention consumer here."""
+    with pytest.raises(ValueError, match="t5_bias"):
+        CausalLMModel(
+            vocab_size=32,
+            hidden_size=16,
+            num_layers=1,
+            num_heads=2,
+            intermediate_size=32,
+            positional="t5_bias",
+        )
+
+
 def test_causal_lm_with_longrope():
     factors = [1.0] * 16
     model = CausalLMModel(
@@ -143,6 +176,27 @@ def test_causal_lm_with_2d_position():
     )
     logits = model(torch.randint(0, 32, (2, 8)))
     assert logits.shape == (2, 8, 32)
+
+
+def test_causal_lm_loss_matches_shifted_cross_entropy():
+    """loss must score position i against labels[i + 1] (finite alone is not enough)."""
+    model = CausalLMModel(
+        vocab_size=32,
+        hidden_size=16,
+        num_layers=1,
+        num_heads=2,
+        intermediate_size=32,
+        attention_name="mha",
+    ).eval()
+    input_ids = torch.randint(0, 32, (2, 6))
+
+    output = model(input_ids, labels=input_ids)
+    logits = model(input_ids)
+    expected = torch.nn.functional.cross_entropy(
+        logits[:, :-1].reshape(-1, 32), input_ids[:, 1:].reshape(-1)
+    )
+    assert output.loss is not None
+    torch.testing.assert_close(output.loss, expected)
 
 
 def _make_prefix_model() -> CausalLMModel:

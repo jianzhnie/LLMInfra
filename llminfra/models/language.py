@@ -47,10 +47,14 @@ class CausalLMModel(nn.Module):
             ``list_attentions()``). Note: ``positional="alibi"`` forces
             ``attention_name="alibi"``, because ALiBi is applied as an
             attention-score bias rather than an input embedding.
+            ``"ring"`` implements causal masking internally and does not
+            support padding masks or prefix-LM masking.
         attention_kwargs: Extra keyword arguments for the attention module.
             For ``"gqa"``, ``num_kv_groups`` defaults to ``num_heads // 2``.
         positional: Positional encoding name (``rope``, ``yarn``, ``ntk``,
-            ``alibi``, ``2d``, ...) or ``"none"``.
+            ``alibi``, ``2d``, ...) or ``"none"``. ``"t5_bias"`` is a
+            score-bias module with no causal-attention consumer in this
+            package and is rejected.
         positional_kwargs: Extra keyword arguments for the positional module.
         use_moe: Replace the FFN with a ``DeepSeekMoE``.
         num_experts: Number of routed experts when ``use_moe`` is set.
@@ -112,6 +116,11 @@ class CausalLMModel(nn.Module):
             # in the ALiBi attention module and skip input-side encoding.
             attention_name = "alibi"
             positional = "none"
+        if positional == "t5_bias":
+            raise ValueError(
+                "t5_bias is an attention-score bias and cannot be applied as "
+                "a causal-LM input embedding"
+            )
         self.attention_name = attention_name
         self.use_moe = bool(use_moe)
         self.tie_word_embeddings = bool(tie_word_embeddings)
@@ -273,9 +282,19 @@ class CausalLMModel(nn.Module):
             )
             hidden_state = hidden_state * query_padding_mask
 
-        combined_mask = self._build_mask(
+        combined_mask: torch.Tensor | None = self._build_mask(
             attention_mask, batch_size, seq_len, device, prefix_len
         )
+        # RingAttention is causal internally and rejects mask arguments; with
+        # no padding or prefix the combined mask would be purely causal, so
+        # omit it. A user-supplied mask still flows through and ring raises
+        # its own error there, which is the documented contract.
+        if (
+            self.attention_name == "ring"
+            and attention_mask is None
+            and prefix_len is None
+        ):
+            combined_mask = None
         last_weights: torch.Tensor | None = None
         for layer_index, block in enumerate(self.blocks):
             wants_weights = (

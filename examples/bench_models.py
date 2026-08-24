@@ -3,7 +3,7 @@
 Measures forward (and forward+backward for the training paths) wall time of
 ``CausalLMModel``, ``EncoderOnlyModel``, ``EncoderDecoderModel`` and
 ``MultimodalCausalLM`` across realistic shapes (batch 2-8, seq 128-2048,
-hidden 256-1024), with and without padding masks / labels.
+hidden 256-768), with and without padding masks / labels.
 
 Timings are medians over an adaptively chosen number of repeats. Run from
 the repository root:
