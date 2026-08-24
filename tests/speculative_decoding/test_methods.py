@@ -4,6 +4,8 @@ import pytest
 import torch
 
 from llminfra import (
+    BlockDiffusionDrafter,
+    DFlashDecoder,
     DSparkDecoder,
     DSparkScheduler,
     Eagle1Speculator,
@@ -15,6 +17,7 @@ from llminfra import (
     MultiTokenPredictionHead,
     NGramSpeculator,
     SpeculativeDecoder,
+    dflash_loss,
     medusa_loss,
     mtp_loss,
 )
@@ -333,3 +336,209 @@ def test_medusa_loss_matches_aligned_weighted_cross_entropy() -> None:
     torch.testing.assert_close(
         medusa_loss(head, hidden, masked_labels, weight_decay=0.8), expected_head0
     )
+
+
+class _StubDrafter:
+    """Drafter stub that always predicts a fixed token per draft slot."""
+
+    def __init__(self, tokens, block_size=4, mask_token_id=0, vocab_size=8):
+        self.block_size = block_size
+        self.mask_token_id = mask_token_id
+        self.tokens = list(tokens)
+        self.vocab_size = vocab_size
+
+    def __call__(self, block, target_features, context_mask=None):
+        logits = torch.zeros(block.size(0), self.block_size, self.vocab_size)
+        for slot, token in enumerate(self.tokens):
+            logits[:, slot + 1, token] = 1.0
+        return logits
+
+
+def _drafter(block_size=4, hidden_size=16, vocab_size=8):
+    return BlockDiffusionDrafter(
+        vocab_size=vocab_size,
+        hidden_size=hidden_size,
+        num_layers=2,
+        num_heads=2,
+        block_size=block_size,
+        mask_token_id=0,
+    )
+
+
+def test_dflash_drafter_output_shape_and_finite():
+    drafter = _drafter()
+    block = torch.zeros(3, 4, dtype=torch.long)
+    features = torch.randn(3, 9, 16)
+    logits = drafter(block, features)
+    assert logits.shape == (3, 4, 8)
+    assert torch.isfinite(logits).all()
+
+
+def test_dflash_drafter_shares_embedding_and_head():
+    embedding = torch.nn.Embedding(8, 16)
+    head = torch.nn.Linear(16, 8, bias=False)
+    drafter = BlockDiffusionDrafter(
+        vocab_size=8,
+        hidden_size=16,
+        num_layers=1,
+        num_heads=2,
+        block_size=4,
+        token_embedding=embedding,
+        lm_head=head,
+    )
+    assert drafter.token_embedding is embedding
+    assert drafter.lm_head is head
+
+
+def test_dflash_drafter_kv_injection_changes_output():
+    drafter = _drafter()
+    block = torch.zeros(1, 4, dtype=torch.long)
+    features_a = torch.randn(1, 6, 16)
+    features_b = torch.randn(1, 6, 16)
+    assert not torch.equal(drafter(block, features_a), drafter(block, features_b))
+
+
+def test_dflash_drafter_context_mask_blocks_future_features():
+    drafter = _drafter()
+    block = torch.zeros(1, 4, dtype=torch.long)
+    features = torch.randn(1, 6, 16)
+    anchor = 2
+    context_mask = torch.arange(6)[None, :] <= anchor
+    perturbed = features.clone()
+    perturbed[:, anchor + 1 :] += 100.0
+    torch.testing.assert_close(
+        drafter(block, features, context_mask),
+        drafter(block, perturbed, context_mask),
+    )
+
+
+def test_dflash_drafter_validates_shapes():
+    drafter = _drafter()
+    with pytest.raises(ValueError, match=r"input_ids must have shape"):
+        drafter(torch.zeros(1, 5, dtype=torch.long), torch.randn(1, 6, 16))
+    with pytest.raises(ValueError, match="target_features"):
+        drafter(torch.zeros(1, 4, dtype=torch.long), torch.randn(2, 6, 16))
+    with pytest.raises(ValueError, match="context_mask"):
+        drafter(
+            torch.zeros(1, 4, dtype=torch.long),
+            torch.randn(1, 6, 16),
+            torch.ones(1, 5, dtype=torch.bool),
+        )
+
+
+def test_dflash_decoder_greedy_is_lossless():
+    target = _fixed_token_model(3, vocab_size=8)
+    decoder = DFlashDecoder(_drafter(), target, append_bonus_token=True)
+    input_ids = torch.tensor([[1, 2, 2]])
+    output = decoder(input_ids, torch.randn(1, 3, 16))
+    # Whatever the drafter proposed, every emitted token is the target's
+    # argmax: greedy speculative decoding is lossless by construction.
+    assert (output[:, 3:] == 3).all()
+    assert output.size(1) - 3 >= 1
+
+
+def test_dflash_decoder_fully_accepted_block_appends_bonus():
+    script = [5, 6, 7]
+    target = _scripted_model({1: [4, *script, 2]}, default_token=0, vocab_size=8)
+    drafter = _StubDrafter(script, block_size=4, vocab_size=8)
+    decoder = DFlashDecoder(drafter, target, append_bonus_token=True)
+    input_ids = torch.tensor([[1, 2]])
+    output = decoder(input_ids, torch.randn(1, 2, 16))
+    # All 3 drafts accepted, then the bonus token: input + 5,6,7 + bonus.
+    assert output.size(1) == 2 + 4
+    assert decoder.last_num_drafted == 3
+    assert decoder.last_num_accepted == 3
+    # Emitted tokens match the target's own greedy continuation.
+    expected = [5, 6, 7, 2]  # script then bonus = target argmax after them
+    assert output[0, 2:].tolist() == expected
+
+
+def test_dflash_decoder_rejected_draft_is_corrected():
+    target = _fixed_token_model(3, vocab_size=8)
+    drafter = _StubDrafter([5, 6, 7], block_size=4, vocab_size=8)
+    decoder = DFlashDecoder(drafter, target, append_bonus_token=True)
+    input_ids = torch.tensor([[1, 2]])
+    output = decoder(input_ids, torch.randn(1, 2, 16))
+    # First draft (5) mismatches the target argmax (3): only the corrected
+    # token is emitted and no bonus is appended.
+    assert output[0].tolist() == [1, 2, 3]
+    assert decoder.last_num_accepted == 0
+
+
+def test_dflash_decoder_pads_shorter_rows():
+    table = {1: [3, 3, 3, 3], 2: [4, 4, 4, 4]}
+    target = _scripted_model(table, default_token=0, vocab_size=8)
+    tokens = [[3, 3, 3], [0, 0, 0]]  # row 0 fully matches, row 1 mismatches
+    logits = torch.zeros(2, 4, 8)
+    for row, row_tokens in enumerate(tokens):
+        for slot, token in enumerate(row_tokens):
+            logits[row, slot + 1, token] = 1.0
+
+    class _BatchStub:
+        block_size = 4
+        mask_token_id = 0
+
+        def __call__(self, block, target_features, context_mask=None):
+            return logits
+
+    decoder = DFlashDecoder(_BatchStub(), target, append_bonus_token=True)
+    input_ids = torch.tensor([[1, 9], [2, 9]])
+    output = decoder(input_ids, torch.randn(2, 2, 16))
+    assert output.size(1) == 2 + 4  # longest row: 3 accepted + bonus
+    assert output[0, 2:].tolist() == [3, 3, 3, 3]
+    assert output[1, 2].item() == 4  # corrected token
+    assert output[1, 3:].eq(decoder.pad_token_id).all()
+
+
+def test_dflash_decoder_sampling_mode_runs():
+    torch.manual_seed(0)
+    target = _fixed_token_model(3, vocab_size=8)
+    decoder = DFlashDecoder(_drafter(), target, temperature=1.0)
+    output = decoder(torch.tensor([[1, 2]]), torch.randn(1, 2, 16))
+    assert output.size(1) >= 3
+    assert output.size(1) <= 2 + 4
+
+
+def test_dflash_decoder_validates_inputs():
+    decoder = DFlashDecoder(_drafter(), _constant_model())
+    with pytest.raises(ValueError, match="batch, seq"):
+        decoder(torch.zeros(4, dtype=torch.long), torch.randn(1, 4, 16))
+    with pytest.raises(ValueError, match="target_features"):
+        decoder(torch.zeros(1, 4, dtype=torch.long), torch.randn(1, 5, 16))
+
+
+def test_dflash_loss_matches_hand_computed_weighted_cross_entropy():
+    drafter = _drafter(block_size=4, vocab_size=8)
+    input_ids = torch.randint(1, 8, (2, 12))
+    features = torch.randn(2, 12, 16)
+
+    torch.manual_seed(0)
+    loss = dflash_loss(drafter, input_ids, features)
+
+    torch.manual_seed(0)
+    anchor = torch.randint(0, 12 - 4 + 1, (2,))
+    block = torch.zeros(2, 4, dtype=torch.long)
+    block[:, 0] = input_ids[torch.arange(2), anchor]
+    context_mask = torch.arange(12)[None, :] <= anchor[:, None]
+    logits = drafter(block, features, context_mask)
+    labels = input_ids.gather(1, anchor[:, None] + torch.arange(1, 4)[None, :])
+    weights = torch.exp(-torch.arange(3, dtype=logits.dtype) / 4.0)
+    per_token = torch.nn.functional.cross_entropy(
+        logits[:, 1:].reshape(-1, 8), labels.reshape(-1), reduction="none"
+    ).view(2, 3)
+    expected = (per_token * weights).sum() / (weights.sum() * 2)
+    torch.testing.assert_close(loss, expected)
+
+
+def test_dflash_loss_requires_sequence_longer_than_block():
+    drafter = _drafter(block_size=4, vocab_size=8)
+    with pytest.raises(ValueError, match="block_size"):
+        dflash_loss(drafter, torch.randint(0, 8, (1, 4)), torch.randn(1, 4, 16))
+
+
+def test_dflash_loss_backward_reaches_draft_layers():
+    drafter = _drafter(block_size=4, vocab_size=8)
+    loss = dflash_loss(drafter, torch.randint(1, 8, (2, 10)), torch.randn(2, 10, 16))
+    loss.backward()
+    assert drafter.layers[0].q_proj.weight.grad is not None
+    assert drafter.layers[0].k_context.weight.grad is not None

@@ -135,6 +135,8 @@ from .quantization import (
     build_quantized,
 )
 from .speculative_decoding import (
+    BlockDiffusionDrafter,
+    DFlashDecoder,
     DSparkDecoder,
     DSparkScheduler,
     Eagle1Speculator,
@@ -146,6 +148,7 @@ from .speculative_decoding import (
     MultiTokenPredictionHead,
     NGramSpeculator,
     SpeculativeDecoder,
+    dflash_loss,
     medusa_loss,
     mtp_loss,
 )
@@ -157,6 +160,7 @@ __all__ = [
     "ALiBiBias",
     "AttentionResidual",
     "BaseAttention",
+    "BlockDiffusionDrafter",
     "BlockSparseAttention",
     "BlockSparseIndexer",
     "CausalLMModel",
@@ -165,6 +169,7 @@ __all__ = [
     "CompressedSparseAttention",
     "CrossAttention",
     "CrossAttentionFuser",
+    "DFlashDecoder",
     "DSparkDecoder",
     "DSparkScheduler",
     "DecoderBlock",
@@ -254,6 +259,7 @@ __all__ = [
     "build_multimodal_position_ids",
     "build_positional_encoding",
     "build_quantized",
+    "dflash_loss",
     "distributed_ring_attention",
     "flash_attention",
     "get_activation",

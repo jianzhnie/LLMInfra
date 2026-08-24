@@ -13,7 +13,7 @@ for public APIs and use subpackages when working on an implementation.
 | `models/` | Encoder, decoder, language, multimodal models and output heads |
 | `flash_attention/` | Educational FlashAttention v1-v4 implementations |
 | `quantization.py` | Fake quantization and QAT wrappers |
-| `speculative_decoding/` | N-Gram, EAGLE, Medusa, MTP and DSpark (DSFlash-style) decoding |
+| `speculative_decoding/` | N-Gram, EAGLE, Medusa, MTP, DFlash and DSpark decoding |
 | `module_registry.py` | Public factories and implementation registries |
 
 ## Naming conventions

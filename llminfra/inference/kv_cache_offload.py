@@ -41,7 +41,7 @@ class OnDiskKVStore:
 
 
 @dataclass
-class _KVRecord:
+class KVRecord:
     """Internal tiered-cache record."""
 
     key: torch.Tensor
@@ -75,8 +75,8 @@ class TieredKVCache:
         if hbm_device is None:
             hbm_device = "cuda" if torch.cuda.is_available() else "cpu"
         self.hbm_device = torch.device(hbm_device)
-        self.hbm: dict[int, _KVRecord] = {}
-        self.cpu: dict[int, _KVRecord] = {}
+        self.hbm: dict[int, KVRecord] = {}
+        self.cpu: dict[int, KVRecord] = {}
         self.nvme: set[int] = set()
 
     def put(self, seq_id: int, key: torch.Tensor, value: torch.Tensor) -> None:
@@ -85,7 +85,7 @@ class TieredKVCache:
             raise ValueError("key and value shapes must match")
         if seq_id in self.nvme:
             self.store.delete(seq_id)
-        self.hbm[seq_id] = _KVRecord(
+        self.hbm[seq_id] = KVRecord(
             key.detach().clone().to(self.hbm_device),
             value.detach().clone().to(self.hbm_device),
             time.monotonic(),
@@ -100,7 +100,7 @@ class TieredKVCache:
             record = self.hbm[seq_id]
         elif seq_id in self.cpu:
             record = self.cpu.pop(seq_id)
-            self.hbm[seq_id] = _KVRecord(
+            self.hbm[seq_id] = KVRecord(
                 record.key.to(self.hbm_device),
                 record.value.to(self.hbm_device),
                 time.monotonic(),
@@ -110,7 +110,7 @@ class TieredKVCache:
         elif seq_id in self.nvme:
             key, value = self.store.load(seq_id)
             self.store.delete(seq_id)
-            self.hbm[seq_id] = _KVRecord(
+            self.hbm[seq_id] = KVRecord(
                 key.to(self.hbm_device),
                 value.to(self.hbm_device),
                 time.monotonic(),
@@ -135,7 +135,7 @@ class TieredKVCache:
         while len(self.hbm) > self.max_hbm_entries:
             seq_id, record = min(self.hbm.items(), key=lambda item: item[1].last_access)
             del self.hbm[seq_id]
-            self.cpu[seq_id] = _KVRecord(
+            self.cpu[seq_id] = KVRecord(
                 record.key.detach().clone().to("cpu"),
                 record.value.detach().clone().to("cpu"),
                 record.last_access,

@@ -20,7 +20,7 @@ from .activations import get_activation
 from .feed_forward import FeedForward, SwiGLUFFN
 
 
-class _GatedFFN(nn.Module):
+class GatedFFN(nn.Module):
     """Base class for gated FFNs computing ``down(act(gate(x)) * up(x))``."""
 
     def __init__(
@@ -57,7 +57,7 @@ class _GatedFFN(nn.Module):
         )
 
 
-class GeGLUFFN(_GatedFFN):
+class GeGLUFFN(GatedFFN):
     """GeGLU feed-forward network: ``down(gelu(gate(x)) * up(x))``.
 
     Same gate/up/down structure as :class:`SwiGLUFFN`, but the gate uses the
@@ -73,7 +73,7 @@ class GeGLUFFN(_GatedFFN):
         super().__init__(hidden_size, intermediate_size, get_activation("gelu"), bias)
 
 
-class ReGLUFFN(_GatedFFN):
+class ReGLUFFN(GatedFFN):
     """ReGLU feed-forward network: ``down(relu(gate(x)) * up(x))``.
 
     Same gate/up/down structure as :class:`SwiGLUFFN`, but the gate uses ReLU
@@ -89,7 +89,7 @@ class ReGLUFFN(_GatedFFN):
         super().__init__(hidden_size, intermediate_size, get_activation("relu"), bias)
 
 
-class ClampedSwiGLUFFN(_GatedFFN):
+class ClampedSwiGLUFFN(GatedFFN):
     """GPT-OSS-style SwiGLU with clamped activations.
 
     Teaching-grade simplification of the GPT-OSS FFN. The forward pass is::
