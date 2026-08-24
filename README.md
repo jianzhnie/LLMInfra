@@ -106,6 +106,7 @@ output.sum().backward()
 | `llminfra/inference/` | KV caches, paging, offload, and sparse indexing |
 | `llminfra/speculative_decoding/` | N-Gram, EAGLE, Medusa, MTP, DFlash, and DSpark |
 | `llminfra/quantization.py` | Fake quantization and QAT utilities |
+| `examples/` | Runnable per-module benchmark scripts |
 | `tests/` | Tests organized to mirror the source package |
 
 Public APIs are re-exported from `llminfra`. Import implementation modules
@@ -119,11 +120,12 @@ Run the test suite:
 pytest
 ```
 
-Run formatting and lint checks:
+Run formatting, lint, and type checks:
 
 ```bash
 ruff format --check .
 ruff check .
+mypy llminfra --strict
 pre-commit run --all-files
 ```
 
@@ -135,6 +137,8 @@ are skipped when CUDA is unavailable.
 
 - [Chinese README](README.zh-CN.md)
 - [Transformer Review 2026](docs/transformers_review_2026.md)
+- [Code audit report (2026-08)](docs/code_audit_2026-08.md) — findings, fixes,
+  and regression-test log from a full-package audit
 - [Package layout and naming conventions](llminfra/README.md)
 
 ## License
