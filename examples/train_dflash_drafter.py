@@ -31,7 +31,7 @@ from torch import nn
 # directly from any working directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from llminfra.speculative_decoding import (
+from llminfra.spec_decode import (
     BlockDiffusionDrafter,
     DFlashDecoder,
     dflash_loss,

@@ -135,7 +135,7 @@ from .quantization import (
     QuantizationConfig,
     build_quantized,
 )
-from .speculative_decoding import (
+from .spec_decode import (
     BlockDiffusionDrafter,
     DFlashDecoder,
     DSparkDecoder,
