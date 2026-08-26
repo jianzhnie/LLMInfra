@@ -89,3 +89,18 @@ known-first-party = ["llminfra"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-v", "--tb=short", "--strict-markers"]
+
+[tool.coverage.run]
+source = ["llminfra"]
+
+[tool.coverage.report]
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "@overload",
+    "def extra_repr",
+    "raise NotImplementedError",
+    "return NotImplemented",
+    "\\.\\.\\.",
+]

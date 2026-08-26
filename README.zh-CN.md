@@ -366,7 +366,7 @@ output = attention(hidden_state, attention_mask=attention_mask)
 | `llminfra/models/` | 语言、编码器、编码器-解码器与多模态模型 |
 | `llminfra/moe/` | 路由器、专家与混合专家模块 |
 | `llminfra/inference/` | KV 缓存、分页、卸载与稀疏索引 |
-| `llminfra/speculative_decoding/` | N-Gram、EAGLE、Medusa、MTP、DFlash、DSpark |
+| `llminfra/spec_decode/` | N-Gram、EAGLE、Medusa、MTP、DFlash、DSpark |
 | `llminfra/quantization.py` | Fake 量化与 QAT 工具 |
 | `examples/` | 各模块的可运行性能基准脚本 |
 | `tests/` | 按源码目录组织的测试 |

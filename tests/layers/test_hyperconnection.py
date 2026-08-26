@@ -86,3 +86,13 @@ def test_transformer_block_rejects_incompatible_mhc_layouts(kwargs):
             manifold_hyper_connection=True,
             **kwargs,
         )
+
+
+def test_hyper_connection_validates_arguments():
+    with pytest.raises(ValueError, match="sinkhorn_iters"):
+        ManifoldConstrainedHyperConnection(16, sinkhorn_iters=0)
+    layer = ManifoldConstrainedHyperConnection(16)
+    with pytest.raises(ValueError, match="identical shapes"):
+        layer(torch.randn(2, 4, 16), torch.randn(2, 5, 16))
+    with pytest.raises(ValueError, match="last dimension"):
+        layer(torch.randn(2, 4, 8), torch.randn(2, 4, 8))

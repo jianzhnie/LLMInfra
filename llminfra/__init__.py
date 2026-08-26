@@ -9,7 +9,7 @@ The package is organized into subpackages by role:
 - `moe`: Mixture-of-Experts components
 - `inference`: KV cache, paging and offload utilities
 - `models`: encoder, decoder, language and multimodal models
-- `speculative_decoding`: N-Gram, EAGLE, Medusa, MTP and DSpark decoding
+- `spec_decode`: N-Gram, EAGLE, Medusa, MTP and DSpark decoding
 
 `quantization` provides fake-quantization/QAT wrappers and
 `module_registry` the public `build_*` / `list_*` factories.

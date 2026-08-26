@@ -285,3 +285,99 @@ def test_paged_cache_append_casts_mismatched_dtype_across_blocks() -> None:
     expected_value = torch.cat((value, extra_value)).to(torch.float16)
     torch.testing.assert_close(actual_key, expected_key)
     torch.testing.assert_close(actual_value, expected_value)
+
+
+def test_tiered_kv_cache_validates_and_hits_hbm(tmp_path) -> None:
+    with pytest.raises(ValueError, match=">= 1"):
+        TieredKVCache(tmp_path / "kv", max_hbm_entries=0)
+    # Default HBM device falls back to CPU when CUDA is unavailable.
+    cache = TieredKVCache(tmp_path / "kv2", max_hbm_entries=2, max_cpu_entries=2)
+    key = torch.randn(2, 3)
+    value = torch.randn(2, 3)
+    cache.put(0, key, value)
+    got_key, got_value = cache.get(0)  # HBM hit path
+    torch.testing.assert_close(got_key, key.to(cache.hbm_device))
+    torch.testing.assert_close(got_value, value.to(cache.hbm_device))
+    with pytest.raises(ValueError, match="shapes must match"):
+        cache.put(1, key, torch.randn(3, 3))
+    with pytest.raises(KeyError, match="unknown KV sequence"):
+        cache.get(99)
+
+
+def test_tiered_kv_cache_reput_after_nvme_eviction_cleans_disk(tmp_path) -> None:
+    """Re-inserting an NVMe-evicted sequence must delete its on-disk copy."""
+    cache = TieredKVCache(tmp_path / "kv", max_hbm_entries=1, max_cpu_entries=1)
+    cache.put(0, torch.zeros(1), torch.zeros(1))
+    cache.put(1, torch.ones(1), torch.ones(1))  # evicts 0: HBM -> CPU
+    cache.put(2, torch.full((1,), 2.0), torch.full((1,), 2.0))  # 0: CPU -> NVMe
+    assert cache.tier_counts() == {"hbm": 1, "cpu": 1, "nvme": 1}
+    assert 0 in cache.nvme
+
+    cache.put(0, torch.full((1,), 3.0), torch.full((1,), 3.0))
+    assert 0 in cache.hbm and 0 not in cache.nvme
+    got_key, _ = cache.get(0)
+    torch.testing.assert_close(got_key, torch.full((1,), 3.0))
+
+    cache.delete(1)  # sequence 1 was evicted to NVMe by the put above
+    assert cache.tier_counts() == {"hbm": 1, "cpu": 1, "nvme": 0}
+    with pytest.raises(KeyError):
+        cache.get(1)
+
+
+def test_paged_block_allocator_validates_and_exhausts() -> None:
+    from llminfra.inference.paged_attention import PagedKVBlockAllocator
+
+    with pytest.raises(ValueError, match="num_blocks"):
+        PagedKVBlockAllocator(0)
+    allocator = PagedKVBlockAllocator(1)
+    block = allocator.allocate()
+    with pytest.raises(RuntimeError, match="full"):
+        allocator.allocate()
+    with pytest.raises(ValueError, match="not allocated"):
+        allocator.retain(7)
+    with pytest.raises(ValueError, match="not allocated"):
+        allocator.free(7)
+    with pytest.raises(ValueError, match="out of range"):
+        allocator.reference_count(5)
+    allocator.free(block)
+    assert allocator.reference_count(block) == 0
+
+
+def test_paged_cache_validates_arguments() -> None:
+    with pytest.raises(ValueError, match=">= 1"):
+        PagedAttentionCache(num_blocks=1, block_size=0, num_heads=1, head_dim=1)
+    cache = PagedAttentionCache(num_blocks=4, block_size=2, num_heads=2, head_dim=4)
+    key = torch.randn(3, 2, 4)
+    with pytest.raises(ValueError, match=r"seq, heads, head_dim"):
+        cache.append(0, torch.randn(2, 4), torch.randn(2, 4))
+    with pytest.raises(ValueError, match="head configuration"):
+        cache.append(0, torch.randn(3, 4, 4), torch.randn(3, 4, 4))
+    with pytest.raises(ValueError, match="same shape"):
+        cache.append(0, key, torch.randn(4, 2, 4))
+    with pytest.raises(KeyError, match="Unknown sequence id"):
+        cache.get(7)
+    cache.append(0, key, key)
+    with pytest.raises(ValueError, match="already exists"):
+        cache.clone_sequence(0, 0)
+    with pytest.raises(KeyError, match="Unknown sequence id"):
+        cache.clone_sequence(9, 1)
+
+
+def test_paged_attention_validates_query_shape() -> None:
+    with pytest.raises(ValueError, match=r"q_len, heads, head_dim"):
+        paged_attention(
+            torch.randn(2, 4),
+            torch.randn(1, 2, 2, 4),
+            torch.randn(1, 2, 2, 4),
+            block_table=[0],
+            num_tokens=2,
+            block_size=2,
+        )
+
+
+def test_sparse_indexer_validates_arguments() -> None:
+    with pytest.raises(ValueError, match=">= 1"):
+        BlockSparseIndexer(8, 2, block_size=0, top_k=1, max_seq_len=16)
+    indexer = BlockSparseIndexer(8, 2, block_size=2, top_k=1, max_seq_len=8)
+    with pytest.raises(ValueError, match="exceeds max_seq_len"):
+        indexer(torch.randn(1, 9, 8))

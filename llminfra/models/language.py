@@ -16,8 +16,8 @@ from ..layers.transformer_block import TransformerBlock
 from ..module_registry import build_attention, build_positional_encoding
 from ..moe import DeepSeekMoE
 from ..positional.multimodal_rope import MultiModalRotaryPositionEmbedding
-from ..speculative_decoding.base import SpeculativeDecoder
-from ..speculative_decoding.mtp import MultiTokenPredictionHead, mtp_loss
+from ..spec_decode.base import SpeculativeDecoder
+from ..spec_decode.mtp import MultiTokenPredictionHead, mtp_loss
 from .encoder_decoder import cached_causal_mask
 
 

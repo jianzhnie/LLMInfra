@@ -13,17 +13,23 @@ import torch
 from llminfra import (
     ALiBiBias,
     DynamicNTKRotaryEmbedding,
+    LearnedAbsolutePositionEmbedding,
+    LongRoPEPreset,
     LongRoPEScaledRotaryEmbedding,
     MultiModalRotaryPositionEmbedding,
+    NoPositionEncoding,
     PartialRotaryPositionEmbedding,
     PositionInterpolation,
     RotaryPositionEmbedding,
+    SinusoidalPositionEmbedding,
     T5RelativePositionBias,
     TwoDimensionalPositionEmbedding,
     YaRNParameters,
     YaRNScaledRotaryEmbedding,
     apply_rotary_pos_emb,
     build_positional_encoding,
+    get_longrope_preset,
+    register_longrope_preset,
 )
 
 
@@ -304,3 +310,267 @@ def test_rotary_cache_growth_matches_uncached_reference():
     rope(x32)
     torch.testing.assert_close(rope(x96), reference(x96))
     torch.testing.assert_close(rope(x32), reference(x32))
+
+
+def test_nope_validates_dimensions():
+    with pytest.raises(ValueError, match=">= 1"):
+        NoPositionEncoding(dim=0)
+    module = NoPositionEncoding(dim=8, max_seq_len=4)
+    with pytest.raises(ValueError, match="expected feature dimension"):
+        module(torch.randn(2, 3, 4))
+    with pytest.raises(ValueError, match="exceeds max_seq_len"):
+        module(torch.randn(2, 5, 8))
+    x = torch.randn(2, 3, 8)
+    assert module(x) is x
+
+
+def test_sinusoidal_validates_arguments():
+    with pytest.raises(ValueError, match="base must be > 0"):
+        SinusoidalPositionEmbedding(dim=8, base=0.0)
+    with pytest.raises(ValueError, match="dropout"):
+        SinusoidalPositionEmbedding(dim=8, dropout=1.5)
+    module = SinusoidalPositionEmbedding(dim=8, max_seq_len=4)
+    with pytest.raises(ValueError, match=r"x must end in \(seq_len, 8\)"):
+        module(torch.randn(2, 3, 4))
+    with pytest.raises(ValueError, match="exceeds max_seq_len"):
+        module(torch.randn(2, 5, 8))
+
+
+def test_sinusoidal_explicit_position_ids():
+    """Explicit position ids gather rows from the precomputed table."""
+    module = SinusoidalPositionEmbedding(dim=16, max_seq_len=16)
+    x = torch.randn(2, 5, 16)
+    positions = torch.arange(5).expand(2, 5)
+    torch.testing.assert_close(module(x, positions), module(x))
+    # Offset ids shift the encoding by the same offset.
+    encoding = module.encoding
+    assert isinstance(encoding, torch.Tensor)
+    torch.testing.assert_close(
+        module(x, positions + 3) - x, encoding[3:8].expand(2, 5, 16)
+    )
+    with pytest.raises(ValueError, match="position_ids must have shape"):
+        module(x, torch.arange(4))
+    with pytest.raises(ValueError, match=r"x must end in \(seq_len, 16\)"):
+        module(torch.randn(2, 5, 4), positions)
+    with pytest.raises(ValueError, match="out-of-range"):
+        module(x, torch.full((2, 5), 16))
+    with pytest.raises(ValueError, match="out-of-range"):
+        module(x, -torch.ones(2, 5, dtype=torch.long))
+
+
+def test_learned_absolute_validates_and_accepts_position_ids():
+    with pytest.raises(ValueError, match=">= 1"):
+        LearnedAbsolutePositionEmbedding(dim=0)
+    with pytest.raises(ValueError, match="dropout"):
+        LearnedAbsolutePositionEmbedding(dim=8, dropout=-0.1)
+    module = LearnedAbsolutePositionEmbedding(dim=8, max_seq_len=16)
+    with pytest.raises(ValueError, match=r"x must end in \(seq_len, 8\)"):
+        module(torch.randn(2, 4))
+    with pytest.raises(ValueError, match="exceeds max_seq_len"):
+        module(torch.randn(1, 20, 8))
+    x = torch.randn(2, 5, 8)
+    ids = torch.arange(5).expand(2, 5)
+    torch.testing.assert_close(module(x, ids), module(x))
+
+
+def test_t5_bias_validates_arguments():
+    with pytest.raises(ValueError, match=">= 1"):
+        T5RelativePositionBias(num_heads=0)
+    with pytest.raises(ValueError, match="num_buckets must be >= 4"):
+        T5RelativePositionBias(num_heads=2, num_buckets=2)
+    with pytest.raises(ValueError, match="even num_buckets"):
+        T5RelativePositionBias(num_heads=2, num_buckets=5, bidirectional=True)
+    with pytest.raises(ValueError, match="max_distance"):
+        T5RelativePositionBias(num_heads=2, num_buckets=8, max_distance=2)
+
+
+def test_t5_bias_unidirectional_flattens_future_positions():
+    """Without bidirectionality, future keys all land in bucket 0."""
+    bias = T5RelativePositionBias(num_heads=2, num_buckets=8, bidirectional=False)
+    out = bias(4, key_length=6)
+    assert out.shape == (1, 2, 4, 6)
+    assert torch.isfinite(out).all()
+    # All future keys (k > q) share the distance-0 bucket, hence one value.
+    future = out[0, :, 0, 1:]
+    torch.testing.assert_close(future, future[..., :1].expand_as(future))
+
+
+def test_t5_bias_validates_length_resolution():
+    bias = T5RelativePositionBias(num_heads=2, max_seq_len=16)
+    # Default call: the full (max_seq_len, max_seq_len) bias grid.
+    assert bias().shape == (1, 2, 16, 16)
+    with pytest.raises(ValueError, match="length tuple"):
+        bias((3,))
+    with pytest.raises(TypeError, match="tensor, int"):
+        bias("4")
+    with pytest.raises(ValueError, match=">= 1"):
+        bias(0)
+    with pytest.raises(ValueError, match="exceeds max_seq_len"):
+        bias(17)
+
+
+def test_alibi_validates_and_supports_symmetric_bias():
+    with pytest.raises(ValueError, match="num_heads"):
+        ALiBiBias(num_heads=0, max_seq_len=8)
+    alibi = ALiBiBias(num_heads=2, max_seq_len=8, causal=False)
+    bias = alibi(5)
+    assert bias.shape == (1, 2, 5, 5)
+    # Symmetric variant: bias depends on |q - k| and has no -inf entries.
+    assert torch.isfinite(bias).all()
+    torch.testing.assert_close(bias, bias.transpose(-1, -2))
+    assert (bias.diagonal(dim1=-2, dim2=-1) == 0).all()
+    with pytest.raises(ValueError, match="exceeds max_seq_len"):
+        ALiBiBias(num_heads=2, max_seq_len=8)(9)
+
+
+def test_factory_validates_required_arguments():
+    with pytest.raises(ValueError, match="yarn requires"):
+        build_positional_encoding("yarn", dim=8)
+    with pytest.raises(ValueError, match="ntk requires"):
+        build_positional_encoding("ntk", dim=8)
+    with pytest.raises(ValueError, match="interpolation requires"):
+        build_positional_encoding("interpolation", dim=8)
+    with pytest.raises(ValueError, match="preset must be a string"):
+        build_positional_encoding("longrope", dim=8, preset=5)
+    with pytest.raises(ValueError, match="unsupported longrope preset arguments"):
+        build_positional_encoding(
+            "longrope", dim=8, preset="reference_uniform_256k", extra=1
+        )
+    with pytest.raises(ValueError, match="invalid types"):
+        build_positional_encoding(
+            "longrope", dim=8, preset="reference_uniform_256k", base="x"
+        )
+    with pytest.raises(ValueError, match="long_factor and short_factor"):
+        build_positional_encoding("longrope", dim=8)
+    with pytest.raises(ValueError, match="original_max_position_embeddings"):
+        build_positional_encoding(
+            "longrope", dim=8, long_factor=[1.0] * 4, short_factor=[1.0] * 4
+        )
+    with pytest.raises(ValueError, match="mrope requires mrope_section"):
+        build_positional_encoding("mrope", dim=8)
+    with pytest.raises(ValueError, match="2d requires max_blocks"):
+        build_positional_encoding("2d", dim=8)
+    with pytest.raises(ValueError, match="alibi requires num_heads"):
+        build_positional_encoding("alibi", dim=8)
+    with pytest.raises(ValueError, match="t5_bias requires num_heads"):
+        build_positional_encoding("t5_bias", dim=8)
+
+
+def test_longrope_preset_registration_roundtrip():
+    """Registered presets with per-frequency tuple factors must expand."""
+    from llminfra.positional.rope_scaling import LONGROPE_PRESETS
+
+    preset = LongRoPEPreset(
+        original_max_position_embeddings=16,
+        max_position_embeddings=64,
+        long_factor=(0.5, 0.5),
+        short_factor=(1.0, 1.0),
+        source="unit test",
+    )
+    register_longrope_preset("unit_test_preset", preset)
+    try:
+        assert get_longrope_preset("unit_test_preset") is preset
+        rope = LongRoPEScaledRotaryEmbedding.from_preset("unit_test_preset", dim=4)
+        x = torch.randn(1, 6, 4)
+        assert rope(x).shape == x.shape
+    finally:
+        del LONGROPE_PRESETS["unit_test_preset"]
+
+
+def test_longrope_preset_registration_validates_names():
+    preset = get_longrope_preset("reference_uniform_256k")
+    with pytest.raises(ValueError, match="must not be empty"):
+        register_longrope_preset("", preset)
+    with pytest.raises(ValueError, match="already exists"):
+        register_longrope_preset("reference_uniform_256k", preset)
+    with pytest.raises(ValueError, match="Unknown LongRoPE preset"):
+        get_longrope_preset("no_such_preset")
+
+
+def test_longrope_rejects_mismatched_factor_lengths():
+    with pytest.raises(ValueError, match=r"dim//2 entries"):
+        LongRoPEScaledRotaryEmbedding(
+            dim=8,
+            original_max_position_embeddings=16,
+            max_seq_len=64,
+            long_factor=[1.0] * 3,
+            short_factor=[1.0] * 4,
+        )
+
+
+def test_dynamic_ntk_scales_beyond_original_context():
+    rope = DynamicNTKRotaryEmbedding(
+        dim=8, original_max_position_embeddings=8, max_seq_len=64
+    )
+    x = torch.randn(2, 20, 8)
+    y = rope(x)  # scaled path: seq 20 > original context 8
+    assert y.shape == x.shape
+    torch.testing.assert_close(y.norm(dim=-1), x.norm(dim=-1), atol=1e-5, rtol=1e-4)
+    # A second call at the same length reuses the memoized scaled table.
+    torch.testing.assert_close(rope(x), y)
+    # Lengths within the original context match the unscaled base RoPE.
+    base = RotaryPositionEmbedding(dim=8, max_seq_len=64)
+    short = torch.randn(2, 6, 8)
+    torch.testing.assert_close(rope(short), base(short))
+
+
+def test_rotary_rejects_odd_dim():
+    with pytest.raises(ValueError, match="even"):
+        RotaryPositionEmbedding(dim=7)
+
+
+def test_apply_rotary_pos_emb_full_width_frequencies():
+    """Full-width cos/sin use the rotate-half (GPT-NeoX style) formula."""
+    x = torch.randn(2, 5, 8)
+    angles = torch.rand(2, 5, 8)
+    cos, sin = angles.cos(), angles.sin()
+    out = apply_rotary_pos_emb(x, cos, sin)
+    x1, x2 = x[..., 0::2], x[..., 1::2]
+    rotated = torch.stack((-x2, x1), dim=-1).flatten(-2)
+    torch.testing.assert_close(out, x * cos + rotated * sin)
+
+
+def test_rope_beyond_cache_cap_computes_on_the_fly(monkeypatch):
+    """Sequences past the table cap bypass the cached-buffer path."""
+    import llminfra.positional.rotary as rotary_module
+
+    monkeypatch.setattr(rotary_module, "_MAX_CACHED_TABLE_ELEMENTS", 8)
+    rope = RotaryPositionEmbedding(dim=4, max_seq_len=64)
+    x = torch.randn(1, 6, 4)  # 6 positions * 2 half-dim > cap of 8
+    y = rope(x)
+    assert not hasattr(rope, "cos_cached")
+    inv_freq = 1.0 / (10000.0 ** (torch.arange(0, 4, 2).float() / 4))
+    freqs = torch.outer(torch.arange(6).float(), inv_freq)
+    cos, sin = freqs.cos(), freqs.sin()
+    x1, x2 = x[..., 0::2], x[..., 1::2]
+    expected = torch.stack((x1 * cos - x2 * sin, x2 * cos + x1 * sin), dim=-1)
+    torch.testing.assert_close(y, expected.flatten(-2))
+
+
+def test_yarn_linear_ramp_mask_degenerate_range():
+    """A zero-width correction range must fall back to an all-ones mask."""
+    from llminfra.positional.rope_scaling import _yarn_linear_ramp_mask
+
+    torch.testing.assert_close(_yarn_linear_ramp_mask(2.0, 2.0, 4), torch.ones(4))
+
+
+def test_mrope_validates_arguments():
+    with pytest.raises(ValueError, match="even feature dimension"):
+        MultiModalRotaryPositionEmbedding(dim=7, mrope_section=(1,))
+    with pytest.raises(ValueError, match="positive integers"):
+        MultiModalRotaryPositionEmbedding(dim=8, mrope_section=(0, 4))
+    with pytest.raises(ValueError, match="sum"):
+        MultiModalRotaryPositionEmbedding(dim=8, mrope_section=(3, 3))
+    mrope = MultiModalRotaryPositionEmbedding(dim=8, mrope_section=(2, 2))
+    with pytest.raises(ValueError, match="x must have shape"):
+        mrope(torch.randn(4, 8))
+    with pytest.raises(ValueError, match="last dimension"):
+        mrope(torch.randn(2, 5, 4))
+
+
+def test_partial_rotary_validates_arguments():
+    with pytest.raises(ValueError, match="partial_rotary_factor"):
+        PartialRotaryPositionEmbedding(dim=8, partial_rotary_factor=0.0)
+    rope = PartialRotaryPositionEmbedding(dim=8, partial_rotary_factor=0.5)
+    with pytest.raises(ValueError, match="full_dim"):
+        rope(torch.randn(1, 4, 4))

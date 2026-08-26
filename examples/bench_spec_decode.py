@@ -13,7 +13,7 @@ being optimized.
 Timings are medians over an adaptively chosen number of repeats. Run from
 the repository root:
 
-    python examples/bench_speculative_decoding.py
+    python examples/bench_spec_decode.py
 """
 
 from __future__ import annotations

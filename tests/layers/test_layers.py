@@ -698,3 +698,109 @@ def test_mha_qk_norm_gives_unit_rms_heads():
     plain = MultiHeadAttention(HIDDEN, HEADS, dropout=0.0)
     q_out, k_out = plain._apply_qk_norm(q, k)
     assert q_out is q and k_out is k
+
+
+def test_feed_forward_activation_variants_and_validation():
+    """Non-default activations must apply the corresponding functional."""
+    import torch.nn.functional as F
+
+    with pytest.raises(ValueError, match="Unknown activation"):
+        FeedForward(16, 32, activation="swish")
+    for name, functional in (("gelu", F.gelu), ("silu", F.silu)):
+        layer = FeedForward(16, 32, activation=name)
+        x = torch.randn(2, 3, 16)
+        torch.testing.assert_close(layer(x), layer.w2(functional(layer.w1(x))))
+
+
+def test_build_feed_forward_validates_sizing_arguments():
+    with pytest.raises(ValueError, match=">= 1"):
+        build_feed_forward("4x", hidden_size=0)
+    with pytest.raises(ValueError, match="intermediate_size must be >= 1"):
+        build_feed_forward("4x", hidden_size=16, intermediate_size=0)
+
+
+def test_rmsnorm_without_affine_has_no_weight():
+    norm = RMSNorm(16, elementwise_affine=False)
+    assert norm.weight is None
+    x = torch.randn(2, 3, 16)
+    expected = x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + norm.eps)
+    torch.testing.assert_close(norm(x), expected)
+
+
+def test_transformer_block_rejects_unknown_norm_type():
+    with pytest.raises(ValueError, match="norm_type"):
+        TransformerBlock(16, 2, 32, norm_type="batchnorm")
+
+
+def test_mamba2_validates_constructor_arguments():
+    with pytest.raises(ValueError, match="d_state"):
+        Mamba2Layer(16, d_state=0)
+    with pytest.raises(ValueError, match="d_inner"):
+        Mamba2Layer(16, d_inner=0)
+    with pytest.raises(ValueError, match="conv_kernel"):
+        Mamba2Layer(16, conv_kernel=0)
+    with pytest.raises(ValueError, match="dt bounds"):
+        Mamba2Layer(16, dt_min=0.2, dt_max=0.1)
+
+
+def test_mamba2_validates_forward_arguments_and_state():
+    from llminfra.layers.mamba2 import Mamba2State
+
+    layer = Mamba2Layer(16)
+    with pytest.raises(ValueError, match=r"batch, seq"):
+        layer(torch.randn(2, 3, 8))
+    with pytest.raises(ValueError, match="chunk_size"):
+        layer(torch.randn(2, 3, 16), chunk_size=0)
+    x = torch.randn(2, 3, 16)
+    _, state = layer(x)
+    with pytest.raises(ValueError, match=r"state\.ssm"):
+        layer(x, state=Mamba2State(state.ssm[:, :1], state.convolution))
+    with pytest.raises(ValueError, match=r"state\.convolution"):
+        layer(x, state=Mamba2State(state.ssm, state.convolution[:, :, :1]))
+
+
+def test_mamba2_conv_kernel_one_keeps_empty_conv_state():
+    """conv_kernel=1 has no history taps; streaming must match single-shot."""
+    layer = Mamba2Layer(16, conv_kernel=1)
+    x = torch.randn(2, 5, 16)
+    out, state = layer(x)
+    assert out.shape == x.shape
+    assert state.convolution.shape == (2, layer.d_inner, 0)
+    streamed = []
+    stream_state = None
+    for step in range(x.size(1)):
+        piece, stream_state = layer(x[:, step : step + 1], state=stream_state)
+        streamed.append(piece)
+    torch.testing.assert_close(torch.cat(streamed, dim=1), out, atol=1e-5, rtol=1e-5)
+
+
+def test_hybrid_ssm_block_validates_pattern():
+    with pytest.raises(ValueError, match="at least one token"):
+        HybridSSMBlock(16, pattern=[])
+    with pytest.raises(ValueError, match="unknown pattern tokens"):
+        HybridSSMBlock(16, pattern="ssm:gru")
+
+
+def test_hybrid_ssm_block_accepts_custom_attention():
+    attention = MultiHeadAttention(16, 2)
+    block = HybridSSMBlock(16, num_heads=2, attention=attention)
+    assert block.layers[-1] is attention
+    x = torch.randn(2, 4, 16)
+    assert block(x).shape == x.shape
+
+
+def test_hybrid_layer_stack_validates_arguments():
+    with pytest.raises(ValueError, match="at least one layer"):
+        HybridLayerStack(16, 2, 32, layer_map=[])
+    with pytest.raises(ValueError, match="dropout"):
+        HybridLayerStack(16, 2, 32, dropout=1.0)
+
+
+def test_hybrid_layer_stack_validates_states():
+    stack = HybridLayerStack(16, 2, 32, layer_map="ssm:full")
+    x = torch.randn(1, 4, 16)
+    with pytest.raises(ValueError, match="one entry per layer_map"):
+        stack(x, states=[None])
+    _, next_states = stack(x, return_state=True)
+    with pytest.raises(ValueError, match="must be None"):
+        stack(x, states=[None, next_states[0]])

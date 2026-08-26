@@ -319,3 +319,121 @@ def test_mixture_of_experts_expert_dropout_training_randomness():
     # Eval mode disables expert dropout: output is deterministic.
     moe.eval()
     torch.testing.assert_close(moe(x), moe(x))
+
+
+def test_expert_ffn_supports_relu_and_gelu():
+    """Non-default activations must apply the corresponding functional."""
+    import torch.nn.functional as F
+
+    for name, functional in (("relu", F.relu), ("gelu", F.gelu)):
+        expert = ExpertFFN(hidden_size=16, intermediate_size=32, activation=name)
+        x = torch.randn(3, 5, 16)
+        torch.testing.assert_close(expert(x), expert.w2(functional(expert.w1(x))))
+
+
+def test_expert_ffn_rejects_unknown_activation():
+    with pytest.raises(ValueError, match="Unknown activation"):
+        ExpertFFN(hidden_size=16, intermediate_size=32, activation="swish")
+
+
+def test_topk_router_validates_arguments():
+    with pytest.raises(ValueError, match="top_k"):
+        TopKRouter(HIDDEN, num_experts=4, top_k=0)
+    with pytest.raises(ValueError, match="top_k"):
+        TopKRouter(HIDDEN, num_experts=4, top_k=5)
+    with pytest.raises(ValueError, match="scoring_func"):
+        TopKRouter(HIDDEN, num_experts=4, top_k=2, scoring_func="tanh")
+    with pytest.raises(ValueError, match="routing_strategy"):
+        TopKRouter(HIDDEN, num_experts=4, top_k=2, routing_strategy="random")
+    with pytest.raises(ValueError, match="gumbel_temperature"):
+        TopKRouter(HIDDEN, num_experts=4, top_k=2, gumbel_temperature=0.0)
+
+
+def test_expert_choice_router_rejects_invalid_top_tokens():
+    with pytest.raises(ValueError, match="top_tokens"):
+        ExpertChoiceRouter(hidden_size=HIDDEN, num_experts=4, top_tokens=0)
+
+
+def test_mixture_of_experts_rejects_invalid_expert_dropout():
+    with pytest.raises(ValueError, match="expert_dropout"):
+        MixtureOfExperts(16, 4, 32, top_k=2, expert_dropout=1.0)
+
+
+def test_deepseek_moe_rejects_zero_shared_experts():
+    with pytest.raises(ValueError, match="num_shared_experts"):
+        DeepSeekMoE(
+            hidden_size=16,
+            num_routed_experts=4,
+            num_shared_experts=0,
+            intermediate_size=32,
+            top_k=2,
+        )
+
+
+def test_expert_parallel_moe_validates_arguments():
+    with pytest.raises(ValueError, match="world_size"):
+        ExpertParallelMoE(HIDDEN, 4, 32, top_k=2, world_size=0)
+    with pytest.raises(ValueError, match="world_size"):
+        ExpertParallelMoE(HIDDEN, 4, 32, top_k=2, world_size=2, rank=2)
+    with pytest.raises(ValueError, match="capacity_factor"):
+        ExpertParallelMoE(HIDDEN, 4, 32, top_k=2, capacity_factor=0.0)
+    with pytest.raises(RuntimeError, match="use_distributed"):
+        ExpertParallelMoE(HIDDEN, 4, 32, top_k=2, use_distributed=True)
+
+
+def test_expert_parallel_moe_rejects_mismatched_process_group(tmp_path):
+    """world_size/rank must agree with the initialized process group."""
+    dist = pytest.importorskip("torch.distributed")
+    if not dist.is_available():
+        pytest.skip("torch.distributed is not available")
+    dist.init_process_group(
+        "gloo", init_method=f"file://{tmp_path}/store", world_size=1, rank=0
+    )
+    try:
+        with pytest.raises(ValueError, match="must match"):
+            ExpertParallelMoE(HIDDEN, 4, 32, top_k=2, world_size=2, rank=0)
+        moe = ExpertParallelMoE(
+            HIDDEN, 4, 32, top_k=2, world_size=1, rank=0, use_distributed=True
+        )
+        assert moe.use_distributed
+    finally:
+        dist.destroy_process_group()
+
+
+def test_expert_parallel_moe_capacity_factor_drops_overflow_tokens():
+    """A tiny capacity factor caps how many tokens each expert serves."""
+    moe = ExpertParallelMoE(
+        hidden_size=HIDDEN,
+        num_experts=4,
+        intermediate_size=32,
+        top_k=2,
+        world_size=1,
+        rank=0,
+        capacity_factor=0.05,
+    )
+    moe.eval()
+    # Identical tokens all route to the same top-2 experts; capacity is
+    # max(1, ceil(0.05 * 8 * 2 / 4)) == 1, so each expert serves one token
+    # (the first) and the remaining rows are dropped to zero.
+    x = torch.ones(2, 4, HIDDEN)
+    out = moe(x).reshape(-1, HIDDEN)
+    assert out.shape == (8, HIDDEN)
+    assert out[0].abs().sum() > 0
+    assert (out[1:] == 0).all()
+
+
+def test_latent_moe_residual_adds_input():
+    moe = LatentMoE(HIDDEN, 16, 4, 32, top_k=2, residual=True)
+    reference = LatentMoE(HIDDEN, 16, 4, 32, top_k=2, residual=False)
+    reference.load_state_dict(moe.state_dict())
+    x = make_hidden_state(BATCH, SEQ, HIDDEN)
+    torch.testing.assert_close(moe(x) - x, reference(x))
+
+
+def test_load_balance_loss_validates_arguments():
+    logits = torch.randn(4, 8)
+    indices = torch.zeros(4, 2, dtype=torch.long)
+    with pytest.raises(ValueError, match="must equal num_experts"):
+        load_balance_loss(logits, indices, num_experts=4)
+    with pytest.raises(ValueError, match=r"\(num_tokens, top_k\)"):
+        load_balance_loss(logits, indices.flatten(), num_experts=8)

@@ -52,3 +52,46 @@ def test_qat_wrapper_quantizes_module_without_mutating_parameters():
 def test_quantization_config_rejects_unknown_mode():
     with pytest.raises(ValueError, match="Unsupported"):
         QuantizationConfig(mode="nf3")  # type: ignore[arg-type]
+
+
+def test_quantization_config_rejects_non_positive_eps():
+    with pytest.raises(ValueError, match="eps"):
+        QuantizationConfig(eps=0.0)
+
+
+def test_fake_quantizer_passes_through_non_float_and_empty_tensors():
+    quantizer = FakeQuantizer(QuantizationConfig(mode="int8"))
+    ints = torch.arange(5)
+    assert quantizer(ints) is ints
+    empty = torch.empty(0)
+    assert quantizer(empty) is empty
+
+
+def test_qat_wrapper_maps_nested_containers_and_leaves():
+    """List inputs are quantized elementwise; non-tensor leaves pass through."""
+
+    class ListModule(nn.Module):
+        def forward(self, tensors, scale):
+            return [tensors[0] + tensors[1], scale]
+
+    wrapped = build_quantized(ListModule(), config=QuantizationConfig(mode="int8"))
+    generator = torch.Generator().manual_seed(0)
+    a = torch.randn(4, generator=generator) * 50  # not exactly representable
+    b = torch.randn(4, generator=generator) * 50
+    out = wrapped([a, b], 3)
+    assert isinstance(out, list)
+    assert out[1] == 3
+    assert out[0].shape == (4,)
+    assert not torch.equal(out[0], a + b)
+
+
+def test_qat_wrapper_can_skip_input_and_weight_quantization():
+    module = nn.Linear(8, 4)
+    config = QuantizationConfig(
+        mode="int8", quantize_inputs=False, quantize_weights=False
+    )
+    wrapped = build_quantized(module, config=config)
+    x = torch.full((2, 8), 100.0)
+    # With inputs and weights untouched, only the output is fake-quantized.
+    reference = FakeQuantizer(QuantizationConfig(mode="int8"))(module(x))
+    torch.testing.assert_close(wrapped(x), reference)

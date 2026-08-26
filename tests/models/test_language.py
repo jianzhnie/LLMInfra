@@ -349,3 +349,128 @@ def test_causal_lm_mtp_head_forward_runs_once_with_labels(monkeypatch):
     input_ids = torch.randint(0, 32, (2, 6))
     model(input_ids, labels=input_ids)
     assert calls == 1
+
+
+def _make_generate_model(max_seq_len: int = 32) -> CausalLMModel:
+    torch.manual_seed(0)
+    model = CausalLMModel(
+        vocab_size=32,
+        hidden_size=16,
+        num_layers=2,
+        num_heads=2,
+        intermediate_size=32,
+        max_seq_len=max_seq_len,
+        attention_name="mha",
+    )
+    model.eval()
+    return model
+
+
+def test_generate_greedy_matches_manual_argmax_loop():
+    model = _make_generate_model()
+    prompt = torch.randint(0, 32, (2, 5))
+    output = model.generate(prompt, max_new_tokens=6)
+    assert output.num_drafted == 0 and output.num_accepted == 0
+
+    with torch.no_grad():
+        expected = prompt
+        for _ in range(6):
+            next_token = model(expected)[:, -1].argmax(dim=-1)
+            expected = torch.cat([expected, next_token[:, None]], dim=-1)
+    assert torch.equal(output.sequences, expected)
+
+
+def test_generate_greedy_is_deterministic():
+    model = _make_generate_model()
+    prompt = torch.randint(0, 32, (2, 5))
+    first = model.generate(prompt, max_new_tokens=5)
+    second = model.generate(prompt, max_new_tokens=5)
+    assert torch.equal(first.sequences, second.sequences)
+
+
+def test_generate_respects_max_new_tokens():
+    model = _make_generate_model()
+    prompt = torch.randint(0, 32, (2, 4))
+    output = model.generate(prompt, max_new_tokens=3)
+    assert output.sequences.shape == (2, 4 + 3)
+    assert torch.equal(output.sequences[:, :4], prompt)
+
+
+def test_generate_stops_at_eos_and_pads_remaining():
+    model = _make_generate_model()
+    # Zero logits make argmax pick token 0 everywhere, so every row emits
+    # eos immediately and the loop stops after a single generated token.
+    with torch.no_grad():
+        model.lm_head.weight.zero_()
+    prompt = torch.randint(1, 32, (2, 4))
+    output = model.generate(prompt, max_new_tokens=5, eos_token_id=0, pad_token_id=9)
+    assert output.sequences.shape == (2, 4 + 1)
+    assert torch.equal(output.sequences[:, 4], torch.zeros(2, dtype=torch.long))
+
+
+def test_generate_eos_stop_is_per_row():
+    model = _make_generate_model()
+    prompt = torch.randint(0, 32, (2, 4))
+
+    def scripted_forward(input_ids, **kwargs):
+        # Row 0 emits eos (3) on the first step; row 1 never does.
+        logits = torch.zeros(2, input_ids.size(1), 32)
+        logits[0, -1, 3] = 1.0
+        logits[1, -1, 7] = 1.0
+        return logits
+
+    original_forward = model.forward
+    model.forward = scripted_forward  # type: ignore[assignment]
+    try:
+        output = model.generate(
+            prompt, max_new_tokens=3, eos_token_id=3, pad_token_id=9
+        )
+    finally:
+        model.forward = original_forward  # type: ignore[assignment]
+
+    assert output.sequences.shape == (2, 4 + 3)
+    # Row 0: eos then padding; row 1: keeps generating to max_new_tokens.
+    assert output.sequences[0, 4:].tolist() == [3, 9, 9]
+    assert output.sequences[1, 4:].tolist() == [7, 7, 7]
+
+
+def test_generate_temperature_sampling_runs_in_bounds():
+    model = _make_generate_model()
+    prompt = torch.randint(0, 32, (2, 4))
+    torch.manual_seed(1)
+    output = model.generate(prompt, max_new_tokens=5, temperature=1.0)
+    generated = output.sequences[:, 4:]
+    assert generated.shape == (2, 5)
+    assert (generated >= 0).all() and (generated < 32).all()
+
+
+def test_generate_speculative_matches_greedy_when_draft_is_target():
+    model = _make_generate_model()
+    prompt = torch.randint(0, 32, (2, 4))
+    greedy = model.generate(prompt, max_new_tokens=6)
+    speculative = model.generate(
+        prompt,
+        max_new_tokens=6,
+        draft_model=model,
+        num_speculative_tokens=3,
+    )
+    # Speculative decoding with an identical draft is lossless: same tokens,
+    # and every drafted token is accepted.
+    assert torch.equal(speculative.sequences, greedy.sequences)
+    assert speculative.num_drafted > 0
+    assert speculative.num_drafted == speculative.num_accepted
+
+
+def test_generate_rejects_invalid_arguments():
+    model = _make_generate_model(max_seq_len=8)
+    prompt = torch.randint(0, 32, (2, 4))
+    with pytest.raises(ValueError, match="max_new_tokens"):
+        model.generate(prompt, max_new_tokens=0)
+    with pytest.raises(ValueError, match="temperature"):
+        model.generate(prompt, max_new_tokens=2, temperature=-0.5)
+    with pytest.raises(ValueError, match="batch, seq_len"):
+        model.generate(torch.randint(0, 32, (4,)))
+    with pytest.raises(ValueError, match="at least one token"):
+        model.generate(torch.empty(2, 0, dtype=torch.long))
+    with pytest.raises(ValueError, match="max_seq_len"):
+        model.generate(prompt, max_new_tokens=6)

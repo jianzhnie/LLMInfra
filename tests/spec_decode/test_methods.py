@@ -542,3 +542,259 @@ def test_dflash_loss_backward_reaches_draft_layers():
     loss.backward()
     assert drafter.layers[0].q_proj.weight.grad is not None
     assert drafter.layers[0].k_context.weight.grad is not None
+
+
+def _strong_token_model(token_id: int, vocab_size: int = 8):
+    """Near-one-hot model: softmax mass of every other token is ~e^-20."""
+
+    def model(input_ids: torch.Tensor) -> torch.Tensor:
+        logits = torch.full((input_ids.size(0), input_ids.size(1), vocab_size), -10.0)
+        logits[..., token_id] = 10.0
+        return logits
+
+    return model
+
+
+def test_speculative_decoder_validates_forward_inputs() -> None:
+    decoder = SpeculativeDecoder(_constant_model(), _constant_model())
+    with pytest.raises(ValueError, match="batch, seq"):
+        decoder(torch.zeros(4, dtype=torch.long))
+    with pytest.raises(ValueError, match="at least one token"):
+        decoder(torch.zeros(1, 0, dtype=torch.long))
+
+
+def test_speculative_decoder_temperature_accepts_matching_distributions() -> None:
+    """Identical draft/target distributions give acceptance probability 1."""
+    torch.manual_seed(0)
+    model = _fixed_token_model(3, vocab_size=8)
+    decoder = SpeculativeDecoder(
+        model, model, num_speculative_tokens=3, temperature=1.0
+    )
+    output = decoder(torch.tensor([[1, 2]]))
+    # Drafts are sampled (not argmax) but always accepted: p_t == p_d.
+    assert output.size(1) == 2 + 3
+    assert decoder.last_num_drafted == 3
+    assert decoder.last_num_accepted == 3
+
+
+def test_speculative_decoder_temperature_rejects_mismatched_draft() -> None:
+    """A draft token with ~zero target mass is rejected and resampled."""
+    torch.manual_seed(0)
+    decoder = SpeculativeDecoder(
+        _strong_token_model(3),
+        _strong_token_model(5),
+        num_speculative_tokens=3,
+        temperature=1.0,
+    )
+    output = decoder(torch.tensor([[1, 2]]))
+    # First draft (3) is rejected immediately; the residual sample is the
+    # target's near-one-hot token (5), and the block stops there.
+    assert decoder.last_num_accepted == 0
+    assert output.tolist() == [[1, 2, 5]]
+
+
+def test_dflash_decoder_sampling_accepts_matching_draft() -> None:
+    """With temperature > 0, drafts matching the target are always accepted."""
+    torch.manual_seed(0)
+    target = _fixed_token_model(3, vocab_size=8)
+    drafter = _StubDrafter([3, 3, 3], block_size=4, vocab_size=8)
+    decoder = DFlashDecoder(drafter, target, temperature=1.0)
+    output = decoder(torch.tensor([[1, 2]]), torch.randn(1, 2, 16))
+    assert decoder.last_num_accepted == 3
+    assert output.size(1) == 2 + 4  # 3 accepted drafts + bonus token
+
+
+def test_dflash_drafter_validates_constructor() -> None:
+    with pytest.raises(ValueError, match="divisible"):
+        BlockDiffusionDrafter(
+            vocab_size=8,
+            hidden_size=10,
+            num_layers=1,
+            num_heads=4,
+            block_size=4,
+            mask_token_id=0,
+        )
+    with pytest.raises(ValueError, match="num_layers"):
+        BlockDiffusionDrafter(
+            vocab_size=8,
+            hidden_size=16,
+            num_layers=0,
+            num_heads=2,
+            block_size=4,
+            mask_token_id=0,
+        )
+    with pytest.raises(ValueError, match="block_size"):
+        BlockDiffusionDrafter(
+            vocab_size=8,
+            hidden_size=16,
+            num_layers=1,
+            num_heads=2,
+            block_size=1,
+            mask_token_id=0,
+        )
+
+
+def test_dflash_decoder_validates_temperature_and_prompt() -> None:
+    with pytest.raises(ValueError, match="temperature"):
+        DFlashDecoder(_drafter(), _constant_model(), temperature=-1.0)
+    decoder = DFlashDecoder(_drafter(), _constant_model())
+    with pytest.raises(ValueError, match="at least one token"):
+        decoder(torch.zeros(1, 0, dtype=torch.long), torch.randn(1, 0, 16))
+
+
+def test_dflash_loss_validates_arguments() -> None:
+    drafter = _drafter()
+    input_ids = torch.randint(0, 8, (2, 6))
+    features = torch.randn(2, 6, 16)
+    with pytest.raises(ValueError, match="batch, seq"):
+        dflash_loss(drafter, torch.zeros(6, dtype=torch.long), features)
+    with pytest.raises(ValueError, match="target_features"):
+        dflash_loss(drafter, input_ids, torch.randn(2, 7, 16))
+    with pytest.raises(ValueError, match="weight_decay"):
+        dflash_loss(drafter, input_ids, features, weight_decay=0.0)
+
+
+def test_dspark_scheduler_validates_arguments() -> None:
+    with pytest.raises(ValueError, match="positive integers"):
+        DSparkScheduler(block_lengths=(0, 1))
+    with pytest.raises(ValueError, match="shrink"):
+        DSparkScheduler(grow_threshold=0.3, shrink_threshold=0.5)
+    with pytest.raises(ValueError, match="initial_length"):
+        DSparkScheduler(block_lengths=(1, 2), initial_length=3)
+    scheduler = DSparkScheduler()
+    with pytest.raises(ValueError, match="num_accepted"):
+        scheduler.update(5, 4)
+
+
+def test_dspark_scheduler_reset() -> None:
+    scheduler = DSparkScheduler(block_lengths=(1, 2, 4), initial_length=4)
+    scheduler.reset()
+    assert scheduler.draft_length == 1
+    scheduler.reset(4)
+    assert scheduler.draft_length == 4
+    with pytest.raises(ValueError, match="reset length"):
+        scheduler.reset(3)
+
+
+def test_eagle_speculator_rejects_short_input() -> None:
+    speculator = EagleSpeculator(
+        _constant_model(), _constant_model(), num_speculative_tokens=4
+    )
+    with pytest.raises(ValueError, match="at least num_speculative_tokens"):
+        speculator(torch.tensor([[1, 2]]), torch.randn(1, 2, 8))
+
+
+def test_eagle_speculator_stops_at_first_mismatch() -> None:
+    speculator = EagleSpeculator(
+        _fixed_token_model(5, vocab_size=8),
+        _fixed_token_model(3, vocab_size=8),
+        num_speculative_tokens=2,
+    )
+    output = speculator(torch.tensor([[1, 2, 3]]), torch.randn(1, 3, 8))
+    # First draft (5) mismatches the target argmax (3): only the corrected
+    # token is emitted and the loop breaks immediately.
+    assert output.tolist() == [[1, 2, 3, 3]]
+
+
+def test_eagle_speculator_appends_bonus_after_full_acceptance() -> None:
+    speculator = EagleSpeculator(
+        _fixed_token_model(3, vocab_size=8),
+        _fixed_token_model(3, vocab_size=8),
+        num_speculative_tokens=2,
+        append_bonus_token=True,
+    )
+    output = speculator(torch.tensor([[1, 2, 3]]), torch.randn(1, 3, 8))
+    # Both drafts accepted, then the bonus token: all target argmax (3).
+    assert output.tolist() == [[1, 2, 3, 3, 3, 3]]
+
+
+def test_medusa_head_validates_arguments() -> None:
+    with pytest.raises(ValueError, match=">= 1"):
+        MedusaHead(hidden_size=0, vocab_size=8, num_heads=2)
+    head = MedusaHead(hidden_size=8, vocab_size=8, num_heads=2)
+    with pytest.raises(ValueError, match="batch, seq_len, hidden_size"):
+        head(torch.randn(4, 8))
+    with pytest.raises(ValueError, match="top_k"):
+        head.generate_candidates(torch.randn(1, 3, 8), top_k=0)
+
+
+def test_medusa_loss_validates_arguments() -> None:
+    head = MedusaHead(hidden_size=8, vocab_size=8, num_heads=2)
+    hidden = torch.randn(2, 5, 8)
+    labels = torch.randint(0, 8, (2, 5))
+    with pytest.raises(ValueError, match="batch and sequence"):
+        medusa_loss(head, hidden, torch.randint(0, 8, (3, 5)))
+    with pytest.raises(ValueError, match="greater than num_heads"):
+        medusa_loss(head, torch.randn(2, 2, 8), torch.randint(0, 8, (2, 2)))
+    with pytest.raises(ValueError, match="weight_decay"):
+        medusa_loss(head, hidden, labels, weight_decay=0.0)
+
+
+def test_medusa_loss_all_ignored_targets_returns_zero() -> None:
+    head = MedusaHead(hidden_size=8, vocab_size=8, num_heads=2)
+    hidden = torch.randn(2, 5, 8)
+    loss = medusa_loss(head, hidden, torch.full((2, 5), -100))
+    assert loss.ndim == 0
+    assert torch.isfinite(loss)
+
+
+def test_mtp_decoder_drafts_and_verifies_with_target() -> None:
+    head = MultiTokenPredictionHead(hidden_size=8, vocab_size=8, num_predictions=2)
+    with torch.no_grad():
+        for linear in head.heads:
+            linear.weight.zero_()
+            linear.weight[5] = 1.0  # argmax is token 5 for an all-ones hidden
+    hidden = torch.ones(1, 2, 8)
+    input_ids = torch.tensor([[1, 2]])
+
+    matching = MTPDecoder(head, _fixed_token_model(5, vocab_size=8))
+    assert matching(input_ids, hidden).tolist() == [[1, 2, 5, 5]]
+
+    mismatching = MTPDecoder(head, _fixed_token_model(3, vocab_size=8))
+    # First draft (5) mismatches the target argmax (3): corrected and stop.
+    assert mismatching(input_ids, hidden).tolist() == [[1, 2, 3]]
+
+
+def test_mtp_head_and_loss_validate_arguments() -> None:
+    with pytest.raises(ValueError, match="num_predictions"):
+        MultiTokenPredictionHead(hidden_size=8, vocab_size=8, num_predictions=0)
+    head = MultiTokenPredictionHead(hidden_size=8, vocab_size=8, num_predictions=2)
+    hidden = torch.randn(2, 5, 8)
+    labels = torch.randint(0, 8, (2, 5))
+    with pytest.raises(ValueError, match="num_future"):
+        mtp_loss(head, hidden, labels, num_future=3)
+    with pytest.raises(ValueError, match="weight_decay"):
+        mtp_loss(head, hidden, labels, weight_decay=0.0)
+    with pytest.raises(ValueError, match="labels shape"):
+        mtp_loss(head, hidden, torch.randint(0, 8, (3, 5)))
+    big_head = MultiTokenPredictionHead(hidden_size=8, vocab_size=8, num_predictions=5)
+    with pytest.raises(ValueError, match="greater than num_future"):
+        mtp_loss(big_head, hidden, labels, num_future=5)
+
+
+def test_mtp_loss_skips_steps_without_valid_targets() -> None:
+    head = MultiTokenPredictionHead(hidden_size=8, vocab_size=8, num_predictions=2)
+    hidden = torch.randn(2, 5, 8, requires_grad=True)
+    labels = torch.randint(0, 8, (2, 5))
+    labels[:, 2:] = -100  # step-1 targets (labels[:, 2:]) are all ignored
+    loss = mtp_loss(head, hidden, labels)
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert hidden.grad is not None and torch.isfinite(hidden.grad).all()
+
+
+def test_mtp_loss_all_ignored_returns_zero_with_gradient() -> None:
+    head = MultiTokenPredictionHead(hidden_size=8, vocab_size=8, num_predictions=2)
+    hidden = torch.randn(2, 5, 8, requires_grad=True)
+    loss = mtp_loss(head, hidden, torch.full((2, 5), -100))
+    assert loss.item() == 0.0
+    loss.backward()  # zero gradient flows instead of erroring
+    assert hidden.grad is not None
+
+
+def test_ngram_speculator_validates_arguments() -> None:
+    with pytest.raises(ValueError, match=">= 1"):
+        NGramSpeculator(_constant_model(), ngram_size=0)
+    speculator = NGramSpeculator(_constant_model(), ngram_size=2)
+    with pytest.raises(ValueError, match="ngram_size"):
+        speculator(torch.tensor([[1]]))
