@@ -468,6 +468,32 @@ def test_alibi_validates_and_supports_symmetric_bias():
         ALiBiBias(num_heads=2, max_seq_len=8)(9)
 
 
+def _bloom_slopes(num_heads: int) -> list[float]:
+    """Reference slope schedule from ``modeling_bloom.build_alibi_tensor``."""
+
+    def power_of_two_slopes(count: int) -> list[float]:
+        start = 2.0 ** (-(2.0 ** -(math.log2(count) - 3)))
+        return [start * start**head for head in range(count)]
+
+    if math.log2(num_heads).is_integer():
+        return power_of_two_slopes(num_heads)
+    nearest = 2.0 ** math.floor(math.log2(num_heads))
+    return (
+        power_of_two_slopes(int(nearest))
+        + power_of_two_slopes(int(2 * nearest))[0::2][: num_heads - int(nearest)]
+    )
+
+
+@pytest.mark.parametrize("num_heads", [1, 2, 3, 4, 5, 8, 12, 16, 24, 112])
+def test_alibi_slopes_match_bloom_schedule(num_heads: int):
+    alibi = ALiBiBias(num_heads=num_heads, max_seq_len=4)
+    expected = torch.tensor(_bloom_slopes(num_heads), dtype=torch.float64)
+    # The slopes buffer is float32, so compare at float32 tolerance.
+    torch.testing.assert_close(
+        alibi.slopes.to(torch.float64), expected, rtol=1e-6, atol=1e-12
+    )
+
+
 def test_factory_validates_required_arguments():
     with pytest.raises(ValueError, match="yarn requires"):
         build_positional_encoding("yarn", dim=8)

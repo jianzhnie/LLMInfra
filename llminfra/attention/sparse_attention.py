@@ -34,6 +34,10 @@ class QueryKeyBlockIndexer(nn.Module):
         causal: Restrict every query block to itself and earlier key blocks.
 
     Notes:
+        Selection granularity is per *query block*: queries are mean-pooled
+        into blocks before scoring, unlike DeepSeek Sparse Attention's
+        indexer, which scores key blocks per individual query token.
+
         Hard ``topk`` indices are discrete. Use :meth:`routing_scores` when an
         auxiliary distillation or ranking loss should train the indexer.
 

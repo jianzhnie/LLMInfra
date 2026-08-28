@@ -121,8 +121,13 @@ def _correction_merge(
     boolean tensor recording which rows took the full-rescale path.
     """
     has_prior_state = torch.isfinite(row_max_block)
-    requires_rescale = ~has_prior_state
-    requires_rescale = requires_rescale | (block_max > row_max_block)
+    # Fully masked tiles (block_sum == 0) contribute nothing: the guarded
+    # merge below is an identity update for them, so they must not count as
+    # "requiring a rescale" in the debug trace either.
+    is_empty_block = block_sum <= 0
+    requires_rescale = (~has_prior_state | (block_max > row_max_block)) & (
+        ~is_empty_block
+    )
 
     merged_out_acc, merged_normalizer, merged_row_max = merge_unnormalized_block(
         out_acc_block,
@@ -150,8 +155,11 @@ def _correction_merge(
     requires_rescale = requires_rescale & ~selective_skip
 
     # Selective-skip path: keep the old row max and fold the new tile in with
-    # a relative scale, leaving the accumulated state untouched.
-    same_scale = ~requires_rescale
+    # a relative scale, leaving the accumulated state untouched. Empty tiles
+    # are excluded: their ``block_max`` placeholder of 0 could make the
+    # relative scale overflow (``exp(0 - row_max)``), and the guarded merged
+    # state is an exact identity for them anyway.
+    same_scale = ~requires_rescale & ~is_empty_block
     relative_scale = torch.exp(block_max - safe_row_max_block)
     same_scale_out_acc = (
         out_acc_block + relative_scale.to(weighted_values.dtype) * weighted_values

@@ -262,7 +262,7 @@ def _manual_module_attention(
         pos = torch.arange(seq)
         distance = pos.view(-1, 1) - pos.view(1, -1)
         if case["causal"]:
-            window = (distance >= 0) & (distance <= case["window"])
+            window = (distance >= 0) & (distance < case["window"])
         else:
             window = distance.abs() <= case["window"]
         window = window.view(1, 1, seq, seq)

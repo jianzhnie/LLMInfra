@@ -7,12 +7,36 @@ import torch
 from .base import BasePositionalEncoding
 
 
+def _alibi_slopes(num_heads: int, slope_base: float) -> list[float]:
+    """Return per-head ALiBi slopes following the BLOOM convention."""
+
+    def power_of_two_slopes(count: int) -> list[float]:
+        return [slope_base ** (-8 * (head + 1) / count) for head in range(count)]
+
+    if num_heads & (num_heads - 1) == 0:
+        return power_of_two_slopes(num_heads)
+    # Non-power-of-two head counts: take the nearest smaller power of two
+    # and pad with every second slope of the doubled sequence, exactly like
+    # ``modeling_bloom.build_alibi_tensor``.
+    nearest = 1 << (num_heads.bit_length() - 1)
+    extra = power_of_two_slopes(2 * nearest)[0::2][: num_heads - nearest]
+    return power_of_two_slopes(nearest) + extra
+
+
 class ALiBiBias(BasePositionalEncoding):
     """Attention with Linear Biases (ALiBi).
 
     ``forward`` returns a bias tensor of shape
     ``(1, num_heads, seq_len, seq_len)`` that can be added to attention
     scores. When ``causal`` is True, future positions receive ``-inf``.
+
+    Head slopes follow the paper/BLOOM convention
+    (``modeling_bloom.build_alibi_tensor``): for power-of-two head counts the
+    geometric sequence ``slope_base ** (-8 * (h + 1) / num_heads)``; for other
+    head counts, the sequence of the nearest smaller power of two is
+    concatenated with every second slope of the sequence for twice that
+    count, so e.g. 12 heads reuse the 8-slope sequence plus 4 interleaved
+    slopes from the 16-slope sequence.
     """
 
     def __init__(
@@ -29,10 +53,7 @@ class ALiBiBias(BasePositionalEncoding):
         self.max_seq_len = int(max_seq_len)
         self.causal = bool(causal)
         self.slope_base = float(slope_base)
-        slopes = [
-            slope_base ** (-8 * (head + 1) / self.num_heads)
-            for head in range(self.num_heads)
-        ]
+        slopes = _alibi_slopes(self.num_heads, self.slope_base)
         self.register_buffer("slopes", torch.tensor(slopes), persistent=False)
         # Bias depends only on (seq_len, device, dtype), so it is memoized
         # within an element budget; larger grids fall back to on-the-fly

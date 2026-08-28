@@ -21,12 +21,11 @@ class SlidingWindowAttention(BaseAttention):
     Args:
         hidden_size: Dimensionality of input and output features.
         num_heads: Number of query heads.
-        window_size: Number of past key/value positions visible to each query.
-            With ``causal=True`` a query therefore attends to
-            ``window_size + 1`` positions in total (itself included) — one
-            more than the ``sliding_window`` convention of Mistral and
-            HuggingFace transformers, which counts the query position as part
-            of the window.
+        window_size: Number of key/value positions visible to each query,
+            the query position itself included. This matches the
+            ``sliding_window`` convention of Mistral and HuggingFace
+            transformers: a causal query at position ``i`` attends to keys in
+            ``[i - window_size + 1, i]``.
         num_kv_groups: Number of shared key/value head groups. Defaults to
             ``num_heads``, which is plain MHA plus the window mask.
         dropout: Dropout probability for attention weights.
@@ -124,7 +123,9 @@ class SlidingWindowAttention(BaseAttention):
         k_pos = torch.arange(kv_len, device=device).view(1, -1)
         distance = q_pos - k_pos + offset
         if self.causal:
-            allowed = (distance >= 0) & (distance <= self.window_size)
+            # Mistral/HF convention: the query position is part of the
+            # window, so a query sees ``window_size`` positions in total.
+            allowed = (distance >= 0) & (distance < self.window_size)
         else:
             allowed = distance.abs() <= self.window_size
         return allowed[None, None]

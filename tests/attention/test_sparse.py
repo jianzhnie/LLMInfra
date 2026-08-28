@@ -48,9 +48,24 @@ def test_sliding_window_weights_respect_window(swa):
     assert weights.shape == (BATCH, HEADS, SEQ, SEQ)
     for i in range(SEQ):
         for j in range(SEQ):
-            allowed = 0 <= i - j <= 2
+            # Mistral/HF convention: with window_size=W the query at i sees
+            # keys in [i - W + 1, i] — the query position counts as part of
+            # the window.
+            allowed = 0 <= i - j < 2
             if not allowed:
                 assert weights[0, 0, i, j].item() == 0.0
+
+
+def test_sliding_window_matches_mistral_window_convention():
+    # With window_size=W a causal query attends to exactly min(i + 1, W)
+    # positions (itself included), matching transformers'
+    # ``sliding_window_overlay`` (kv_idx > q_idx - W).
+    swa = SlidingWindowAttention(HIDDEN, HEADS, window_size=3, dropout=0.0)
+    x = make_hidden_state(1, SEQ, HIDDEN)
+    _, weights = swa(x, return_attention_weights=True)
+    nonzero_per_row = (weights[0, 0] > 0).sum(dim=-1)
+    expected = torch.tensor([min(i + 1, 3) for i in range(SEQ)])
+    assert torch.equal(nonzero_per_row, expected)
 
 
 def test_sliding_window_large_window_equals_gqa():

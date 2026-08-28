@@ -36,7 +36,7 @@ class ExpertFFN(nn.Module):
         self._init_weights()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply the gated-style FFN ``w2(act(w1(x)))`` to the input."""
+        """Apply the single-path FFN ``w2(act(w1(x)))`` to the input."""
         output: torch.Tensor = self.w2(self._activation(self.w1(x)))
         return output
 

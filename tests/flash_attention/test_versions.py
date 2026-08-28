@@ -297,3 +297,36 @@ def test_fa4_correction_initializes_empty_state():
     )
     assert rescaled.all().item()
     assert torch.isfinite(row_max).all()
+
+
+def test_fa4_fully_masked_tile_is_identity_and_reports_no_rescale():
+    # A fully masked tile (block_sum == 0) must be an exact identity update
+    # and must not be reported as a rescale, for both fresh and populated
+    # state. ``compute_block_softmax`` reports block_max 0 for masked rows.
+    empty_tile = {
+        "block_sum": torch.zeros(1, 1, 1, 1),
+        "weighted_values": torch.zeros(1, 1, 1, 2),
+    }
+    # Fresh state: nothing happens at all.
+    out_acc, normalizer, row_max, rescaled = _correction_merge_for(
+        0.0,
+        out_acc_block=torch.zeros(1, 1, 1, 2),
+        normalizer_block=torch.zeros(1, 1, 1, 1),
+        row_max_block=torch.full((1, 1, 1, 1), float("-inf")),
+        **empty_tile,
+    )
+    assert not rescaled.any().item()
+    assert torch.isinf(row_max).all()
+    assert torch.equal(out_acc, torch.zeros(1, 1, 1, 2))
+    assert torch.equal(normalizer, torch.zeros(1, 1, 1, 1))
+    # Populated state with a very negative running max: the placeholder
+    # block_max of 0 must not trigger a spurious rescale, and the
+    # selective-skip relative scale must not overflow into inf * 0.
+    out_acc, _, row_max, rescaled = _correction_merge_for(
+        0.0,
+        row_max_block=torch.full((1, 1, 1, 1), -100.0),
+        **empty_tile,
+    )
+    assert not rescaled.any().item()
+    assert torch.equal(row_max, torch.full((1, 1, 1, 1), -100.0))
+    assert torch.isfinite(out_acc).all()
