@@ -130,3 +130,39 @@ def test_mxfp4_preserves_shape_for_ragged_last_dim():
     quantized = FakeQuantizer(QuantizationConfig(mode="mxfp4"))(x)
     assert quantized.shape == x.shape
     assert torch.isfinite(quantized).all()
+
+
+def test_nvfp4_quantizes_to_e2m1_grid_with_fp8_scale():
+    """Block max 6 -> raw scale 1.0 is exact in E4M3; values snap to E2M1."""
+    values = torch.zeros(16)
+    values[0] = 6.0
+    values[1] = 0.4  # -> 0.5
+    values[2] = -2.6  # -> -3.0
+    quantized = FakeQuantizer(QuantizationConfig(mode="nvfp4"))(values)
+    expected = torch.zeros(16)
+    expected[0:3] = torch.tensor([6.0, 0.5, -3.0])
+    torch.testing.assert_close(quantized, expected)
+
+
+def test_nvfp4_block_scale_rounds_to_e4m3():
+    """The per-16 block scale is itself FP8-E4M3 quantized, unlike MXFP4."""
+    values = torch.zeros(16)
+    values[0] = 6.4  # raw scale 6.4/6 ~= 1.067 -> nearest E4M3 is 1.125
+    values[1] = 4.9  # 4.9/1.125 ~= 4.36 -> E2M1 level 4 -> 4 * 1.125 = 4.5
+    quantized = FakeQuantizer(QuantizationConfig(mode="nvfp4"))(values)
+    assert quantized[1].item() == 4.5
+    # MXFP4 on the same input would use the power-of-two scale 1.0 and round
+    # 4.9 to level 4 as well, so also check a value where the grids differ:
+    values[1] = 5.2  # NVFP4: 5.2/1.125 ~= 4.62 -> 4 -> 4.5
+    quantized = FakeQuantizer(QuantizationConfig(mode="nvfp4"))(values)
+    assert quantized[1].item() == 4.5
+
+
+def test_nvfp4_uses_16_element_blocks():
+    """A large value must not shrink the scale of elements 16 positions away."""
+    values = torch.zeros(32)
+    values[0] = 96.0  # block 0: scale = E4M3(16) = 16
+    values[16] = 0.4  # block 1: scale = E4M3(0.0667) = 0.0703125
+    # 0.4 / 0.0703125 ~= 5.69 -> E2M1 level 6 -> 6 * 0.0703125 = 0.421875
+    quantized = FakeQuantizer(QuantizationConfig(mode="nvfp4"))(values)
+    assert quantized[16].item() == 0.421875

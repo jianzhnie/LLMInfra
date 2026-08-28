@@ -343,3 +343,56 @@ def test_mha_attention_sink_keeps_fully_masked_rows_finite():
     torch.testing.assert_close(out[0], torch.zeros_like(out[0]), atol=1e-6, rtol=0)
     out.sum().backward()
     assert x.grad is not None and torch.isfinite(x.grad).all()
+
+
+def test_mha_output_gate_matches_manual_reference():
+    # Qwen3-Next style: output * sigmoid(gate(hidden_state)) before o_proj.
+    mha = MultiHeadAttention(HIDDEN, HEADS, dropout=0.0, output_gate=True)
+    assert mha.gate_proj is not None
+    x = make_hidden_state(BATCH, SEQ, HIDDEN)
+    out = mha(x)
+
+    q, k, v = (
+        mha.split_head(mha.q_proj(x)),
+        mha.split_head(mha.k_proj(x)),
+        mha.split_head(mha.v_proj(x)),
+    )
+    weights = torch.softmax(q @ k.transpose(-1, -2) * mha.scale_factor, dim=-1)
+    ref = weights @ v
+    ref = ref * torch.sigmoid(
+        mha.gate_proj(x).view(BATCH, SEQ, HEADS, -1).transpose(1, 2)
+    )
+    ref = mha.o_proj(mha.combine_head(ref))
+    torch.testing.assert_close(out, ref)
+
+
+def test_gqa_output_gate_matches_manual_reference():
+    gqa = GroupedQueryAttention(
+        HIDDEN, HEADS, num_kv_groups=2, dropout=0.0, output_gate=True
+    )
+    assert gqa.gate_proj is not None
+    x = make_hidden_state(BATCH, SEQ, HIDDEN)
+    out = gqa(x)
+
+    q = gqa.split_head(gqa.q_proj(x))
+    k = gqa.split_head_grouped(gqa.k_proj(x))
+    v = gqa.split_head_grouped(gqa.v_proj(x))
+    weights = torch.softmax(q @ k.transpose(-1, -2) * gqa.scale_factor, dim=-1)
+    ref = weights @ v
+    ref = ref * torch.sigmoid(
+        gqa.gate_proj(x).view(BATCH, SEQ, HEADS, -1).transpose(1, 2)
+    )
+    ref = gqa.o_proj(gqa.combine_head(ref))
+    torch.testing.assert_close(out, ref)
+
+
+def test_output_gate_gradient_flows_to_gate_projection():
+    gqa = GroupedQueryAttention(
+        HIDDEN, HEADS, num_kv_groups=2, dropout=0.0, output_gate=True
+    )
+    x = make_hidden_state(BATCH, SEQ, HIDDEN)
+    gqa(x).sum().backward()
+    assert gqa.gate_proj is not None
+    assert gqa.gate_proj.weight.grad is not None
+    assert torch.isfinite(gqa.gate_proj.weight.grad).all()
+    assert gqa.gate_proj.weight.grad.abs().sum() > 0

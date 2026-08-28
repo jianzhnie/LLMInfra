@@ -36,6 +36,9 @@ class MultiHeadAttention(BaseAttention):
         attention_sink (bool, optional): Whether to add one learnable sink
             logit per head to the softmax denominator (GPT-OSS /
             StreamingLLM style). Defaults to False.
+        output_gate (bool, optional): Whether to add a sigmoid output gate
+            computed from the layer input and applied before ``o_proj``
+            (Qwen3-Next / "Gated Attention" style). Defaults to False.
 
     Attributes:
         num_heads (int): Number of attention heads.
@@ -58,6 +61,7 @@ class MultiHeadAttention(BaseAttention):
         qk_norm: bool = False,
         logit_softcap: float | None = None,
         attention_sink: bool = False,
+        output_gate: bool = False,
     ) -> None:
         super().__init__(
             hidden_size,
@@ -76,6 +80,12 @@ class MultiHeadAttention(BaseAttention):
 
         # Output projection
         self.o_proj = nn.Linear(hidden_size, hidden_size, bias=bias)
+
+        if output_gate:
+            # Qwen3-Next derives the gate by doubling the query projection
+            # and chunking it; a separate projection is the equivalent
+            # parameterization and keeps the two paths independent.
+            self.gate_proj = nn.Linear(hidden_size, hidden_size, bias=bias)
 
         self._init_projections(self.q_proj, self.k_proj, self.v_proj, self.o_proj)
 
@@ -128,9 +138,10 @@ class MultiHeadAttention(BaseAttention):
             attention_scores, attention_mask
         )
 
-        # Weighted sum of values, merge heads, output projection
+        # Weighted sum of values, merge heads, optional output gate, projection
         output: torch.Tensor = torch.matmul(attention_weights, value)
-        output = self.o_proj(self.combine_head(output))
+        output = self._apply_output_gate(hidden_state, self.combine_head(output))
+        output = self.o_proj(output)
 
         if return_attention_weights:
             return output, attention_weights

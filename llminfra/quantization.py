@@ -8,6 +8,7 @@ replace vendor FP8/INT8 kernels used by production inference engines.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
@@ -15,7 +16,11 @@ import torch
 from torch import nn
 from torch.func import functional_call
 
-QuantizationMode = Literal["int4", "int8", "fp8_e4m3", "mxfp4"]
+QuantizationMode = Literal["int4", "int8", "fp8_e4m3", "mxfp4", "nvfp4"]
+
+# Magnitudes representable in the FP4 E2M1 element format (sign applied
+# separately), shared by the MXFP4 and NVFP4 block formats.
+_E2M1_LEVELS = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
 
 
 @dataclass(frozen=True)
@@ -25,9 +30,11 @@ class QuantizationConfig:
     Args:
         mode: Target numerical format. ``"mxfp4"`` is the OCP Microscaling
             FP4 format (E2M1 elements with a shared power-of-two E8M0 scale
-            per 32-element block, as used by GPT-OSS); it always operates on
-            32-element blocks along the last axis and ignores
-            ``per_channel``/``channel_axis``.
+            per 32-element block, as used by GPT-OSS); ``"nvfp4"`` is the
+            NVIDIA FP4 variant (E2M1 elements with a finer FP8-E4M3 scale per
+            16-element block, as used by Blackwell-era models). Both block
+            formats ignore ``per_channel``/``channel_axis``; the two-level
+            global scale of real NVFP4 recipes is treated as 1.
         per_channel: Compute one scale per channel instead of one scale for
             the entire tensor. This is most useful for weight tensors.
         channel_axis: Axis retained when ``per_channel=True``.
@@ -48,7 +55,7 @@ class QuantizationConfig:
 
     def __post_init__(self) -> None:
         """Reject unsupported modes and non-positive ``eps`` values."""
-        if self.mode not in {"int4", "int8", "fp8_e4m3", "mxfp4"}:
+        if self.mode not in {"int4", "int8", "fp8_e4m3", "mxfp4", "nvfp4"}:
             raise ValueError(f"Unsupported quantization mode: {self.mode!r}")
         if self.eps <= 0:
             raise ValueError("eps must be > 0")
@@ -70,6 +77,8 @@ class FakeQuantizer(nn.Module):
                 quantized = self._fake_fp8_e4m3(tensor)
             elif self.config.mode == "mxfp4":
                 quantized = self._fake_mxfp4(tensor)
+            elif self.config.mode == "nvfp4":
+                quantized = self._fake_nvfp4(tensor)
             else:
                 bits = 4 if self.config.mode == "int4" else 8
                 quantized = self._fake_symmetric_integer(tensor, bits)
@@ -127,30 +136,25 @@ class FakeQuantizer(nn.Module):
         return rounded
 
     @staticmethod
-    def _fake_mxfp4(tensor: torch.Tensor) -> torch.Tensor:
-        """Simulate OCP Microscaling FP4 (MXFP4) without FP4 hardware.
+    def _fake_fp4_blocks(
+        tensor: torch.Tensor,
+        block_size: int,
+        scale_fn: Callable[[torch.Tensor], torch.Tensor],
+    ) -> torch.Tensor:
+        """Shared E2M1 block-quantization core for the FP4 formats.
 
-        Elements use the E2M1 format (magnitudes 0, 0.5, 1, 1.5, 2, 3, 4, 6)
-        and share one power-of-two E8M0 scale per 32-element block along the
-        last axis. The scale is chosen as ``2 ** floor(log2(max_abs / 6))``
-        so the block maximum maps inside the representable range without
-        saturation.
+        ``scale_fn`` maps each block's ``max_abs`` (already clamped away from
+        zero) to its scale, which is what distinguishes MXFP4 (power-of-two
+        E8M0 scale) from NVFP4 (FP8 E4M3 scale).
         """
-        block_size = 32
-        # Magnitudes representable in E2M1 (sign is applied separately).
-        levels = torch.tensor(
-            [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0],
-            dtype=tensor.dtype,
-            device=tensor.device,
-        )
+        levels = torch.tensor(_E2M1_LEVELS, dtype=tensor.dtype, device=tensor.device)
         last_dim = tensor.size(-1)
         pad = (-last_dim) % block_size
         padded = torch.nn.functional.pad(tensor, (0, pad)) if pad else tensor
         blocks = padded.reshape(*padded.shape[:-1], -1, block_size)
 
         max_abs = blocks.abs().amax(dim=-1, keepdim=True)
-        safe_max = max_abs.clamp_min(torch.finfo(tensor.dtype).tiny)
-        scale = torch.exp2(torch.floor(torch.log2(safe_max / 6.0)))
+        scale = scale_fn(max_abs.clamp_min(torch.finfo(tensor.dtype).tiny))
         normalized = (blocks / scale).abs()
         # Round to the nearest E2M1 magnitude.
         nearest = (normalized.unsqueeze(-1) - levels).abs().argmin(dim=-1)
@@ -158,6 +162,38 @@ class FakeQuantizer(nn.Module):
 
         quantized = quantized.reshape(*padded.shape)
         return quantized[..., :last_dim] if pad else quantized
+
+    @staticmethod
+    def _fake_mxfp4(tensor: torch.Tensor) -> torch.Tensor:
+        """Simulate OCP Microscaling FP4 (MXFP4) without FP4 hardware.
+
+        Elements use the E2M1 format and share one power-of-two E8M0 scale
+        per 32-element block along the last axis. The scale is chosen as
+        ``2 ** floor(log2(max_abs / 6))`` so the block maximum maps inside
+        the representable range without saturation.
+        """
+
+        def power_of_two_scale(max_abs: torch.Tensor) -> torch.Tensor:
+            return torch.exp2(torch.floor(torch.log2(max_abs / 6.0)))
+
+        return FakeQuantizer._fake_fp4_blocks(tensor, 32, power_of_two_scale)
+
+    @staticmethod
+    def _fake_nvfp4(tensor: torch.Tensor) -> torch.Tensor:
+        """Simulate NVIDIA FP4 (NVFP4) without FP4 hardware.
+
+        Compared to MXFP4, NVFP4 uses smaller 16-element blocks and stores
+        the per-block scale itself in FP8 E4M3 instead of a power of two.
+        The two-level global FP32 scale of real NVFP4 recipes is treated as
+        1 here (a calibration concern, not a format property).
+        """
+
+        def e4m3_scale(max_abs: torch.Tensor) -> torch.Tensor:
+            # Clamp to the smallest E4M3 subnormal so the element division
+            # never divides by zero.
+            return FakeQuantizer._fake_fp8_e4m3(max_abs / 6.0).clamp_min(2.0**-9)
+
+        return FakeQuantizer._fake_fp4_blocks(tensor, 16, e4m3_scale)
 
     def extra_repr(self) -> str:
         """Show the quantizer mode and channel configuration in ``repr``."""

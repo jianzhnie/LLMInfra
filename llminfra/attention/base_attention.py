@@ -82,6 +82,11 @@ class BaseAttention(nn.Module, ABC):
         else:
             self.sink_logits = None
 
+        # Subclasses that support the Qwen3-Next style sigmoid output gate
+        # replace this with a Linear projection and call
+        # :meth:`_apply_output_gate` after :meth:`combine_head`.
+        self.gate_proj: nn.Linear | None = None
+
     @abstractmethod
     def forward(
         self,
@@ -164,6 +169,30 @@ class BaseAttention(nn.Module, ABC):
         return (
             x.transpose(1, 2).contiguous().view(batch_size, seq_len, self.hidden_size)
         )
+
+    def _apply_output_gate(
+        self, hidden_state: torch.Tensor, output: torch.Tensor
+    ) -> torch.Tensor:
+        """Apply the optional Qwen3-Next style sigmoid output gate.
+
+        The gate is computed from the attention layer's *input* and applied
+        elementwise to the head-combined output before ``o_proj``
+        (``output * sigmoid(W_g @ hidden_state)``), as in Qwen3-Next and the
+        "Gated Attention" paper (Qiu et al., 2025). It is a no-op unless the
+        subclass created :attr:`gate_proj`.
+
+        Args:
+            hidden_state: Attention layer input, shape
+                (batch_size, seq_len, hidden_size)
+            output: Head-combined attention output, same shape
+
+        Returns:
+            The gated (or unchanged) output tensor.
+
+        """
+        if self.gate_proj is None:
+            return output
+        return output * torch.sigmoid(self.gate_proj(hidden_state))
 
     def apply_attention_mask(
         self, attention_scores: torch.Tensor, attention_mask: torch.Tensor | None
