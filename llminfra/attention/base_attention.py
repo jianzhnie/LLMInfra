@@ -75,6 +75,8 @@ class BaseAttention(nn.Module, ABC):
             attention_mask: Optional attention mask, broadcastable against the
                 (batch_size, num_heads, seq_len, seq_len) score tensor.
                 1/True marks positions to attend to, 0/False masks them out.
+                A 3D mask is interpreted as (batch_size, seq_len, seq_len) and
+                broadcast over all heads.
             return_attention_weights: Whether to return attention weights
 
         Returns:
@@ -156,6 +158,11 @@ class BaseAttention(nn.Module, ABC):
 
         """
         if attention_mask is not None:
+            # A 3D mask is (batch, q_len, kv_len); promote it to
+            # (batch, 1, q_len, kv_len) so it broadcasts over heads instead
+            # of misaligning its batch dim with the head dim.
+            if attention_mask.dim() == 3:
+                attention_mask = attention_mask.unsqueeze(1)
             attention_scores = torch.masked_fill(
                 attention_scores, attention_mask == 0, float("-inf")
             )

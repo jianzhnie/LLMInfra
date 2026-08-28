@@ -13,6 +13,7 @@ from helpers import make_hidden_state
 
 from llminfra import (
     GatedDeltaNet,
+    KimiDeltaAttention,
     LightningAttention,
     LinearAttention,
     build_attention,
@@ -265,3 +266,103 @@ def test_lightning_attention_causal_does_not_see_future():
     perturbed[:, 1] += 10.0  # inside the first block, ahead of position 0
 
     torch.testing.assert_close(module(x)[:, 0], module(perturbed)[:, 0])
+
+
+def _delta_rule_reference(module, x, attention_mask=None):
+    """Slow reference for the KDA recurrence.
+
+    Written directly from the gated delta rule as implemented by
+    transformers' ``torch_recurrent_gated_delta_rule``
+    (``models/qwen3_next/modeling_qwen3_next.py``): decay the state, predict
+    ``Sᵀk``, write the beta-scaled error ``v - Sᵀk`` back, then read out with
+    the L2-normalized, ``1/sqrt(feature_dim)``-scaled query. Unlike the
+    Qwen3-Next variant the decay here is per key dimension, as in the Kimi
+    Linear paper.
+    """
+    query = module._split(module.q_proj(x))
+    key = module._split(module.k_proj(x))
+    value = module.split_head(module.v_proj(x))
+    query = torch.nn.functional.normalize(query, dim=-1, eps=1e-6) / math.sqrt(
+        module.feature_dim
+    )
+    key = torch.nn.functional.normalize(key, dim=-1, eps=1e-6)
+    beta = torch.sigmoid(module.beta_proj(x)).transpose(1, 2).unsqueeze(-1)
+    decay = -torch.nn.functional.softplus(module._split(module.decay_proj(x)))
+
+    valid = module._key_padding_mask(attention_mask, x.size(0), x.size(1))
+    if valid is not None:
+        valid_f = valid.to(dtype=x.dtype)
+        key = key * valid_f.unsqueeze(-1)
+        value = value * valid_f.unsqueeze(-1)
+        beta = beta * valid_f.unsqueeze(-1)
+        decay = decay * valid_f.unsqueeze(-1)
+
+    state = torch.zeros(
+        x.size(0),
+        module.num_heads,
+        module.feature_dim,
+        module.head_dim,
+        dtype=x.dtype,
+    )
+    outputs = []
+    for step in range(x.size(1)):
+        state = state * decay[:, :, step].exp().unsqueeze(-1)
+        prediction = (state * key[:, :, step].unsqueeze(-1)).sum(dim=-2)
+        error = value[:, :, step] - prediction
+        state = state + beta[:, :, step].unsqueeze(-1) * (
+            key[:, :, step].unsqueeze(-1) * error.unsqueeze(-2)
+        )
+        outputs.append((state * query[:, :, step].unsqueeze(-1)).sum(dim=-2))
+    out = module.combine_head(torch.stack(outputs, dim=2))
+    if module.gate_proj is not None:
+        out = out * torch.sigmoid(module.gate_proj(x))
+    out = module.o_proj(out)
+    if valid is not None:
+        out = out * valid.transpose(1, 2).to(out.dtype)
+    return out
+
+
+@pytest.mark.parametrize("output_gate", [False, True])
+@pytest.mark.parametrize("masked", [False, True])
+def test_kimi_delta_attention_matches_delta_rule_reference(output_gate, masked):
+    """The KDA recurrence must equal the gated delta rule, step by step.
+
+    The same construction (identity-preserving projections, random gate and
+    decay projections) was cross-checked numerically against transformers'
+    ``torch_recurrent_gated_delta_rule`` and agrees to float32 round-off.
+    Compared in float64 for tight tolerances.
+    """
+    module = (
+        KimiDeltaAttention(
+            HIDDEN,
+            HEADS,
+            feature_dim=16,
+            output_gate=output_gate,
+            beta_init=0.0,
+            decay_init=0.0,
+        )
+        .double()
+        .eval()
+    )
+    x = make_hidden_state(BATCH, SEQ, HIDDEN).double()
+    mask = None
+    if masked:
+        mask = torch.ones(BATCH, 1, SEQ, dtype=torch.bool)
+        mask[0, 0, -2:] = False  # padding must not decay or write the state
+
+    torch.testing.assert_close(
+        module(x, attention_mask=mask),
+        _delta_rule_reference(module, x, mask),
+        rtol=1e-6,
+        atol=1e-8,
+    )
+
+
+def test_kimi_delta_attention_does_not_see_future():
+    """Perturbing a future token must not change earlier outputs."""
+    module = KimiDeltaAttention(HIDDEN, HEADS, feature_dim=16).eval()
+    x = make_hidden_state(BATCH, SEQ, HIDDEN)
+    perturbed = x.clone()
+    perturbed[:, -1] += 10.0
+
+    torch.testing.assert_close(module(x)[:, :-1], module(perturbed)[:, :-1])

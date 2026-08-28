@@ -169,7 +169,9 @@ class BlockSparseAttention(BaseAttention):
                 f"block_indices has {block_indices.size(2)} query blocks, "
                 f"expected {num_q_blocks}"
             )
-        if block_indices.numel() == 0 or block_indices.max() >= num_kv_blocks:
+        if block_indices.numel() == 0 or (
+            block_indices.min() < 0 or block_indices.max() >= num_kv_blocks
+        ):
             raise ValueError("block_indices contains an out-of-range block id")
 
         selected = torch.zeros(
@@ -189,10 +191,12 @@ class BlockSparseAttention(BaseAttention):
         # fancy-index lookup when expanding blocks to token granularity.
         allowed = selected[:, :, q_block][:, :, :, k_block]
         if self.causal:
+            # Right-align the query window against the KV window: query i is
+            # the global position i + (kv_len - q_len), as in cached decoding.
             offset = kv_len - q_len
             q_pos = torch.arange(q_len, device=device).view(-1, 1)
             k_pos = torch.arange(kv_len, device=device).view(1, -1)
-            allowed = allowed & ((q_pos - offset) >= k_pos)[None, None]
+            allowed = allowed & ((q_pos + offset) >= k_pos)[None, None]
         return allowed
 
     def _fallback_block_indices(

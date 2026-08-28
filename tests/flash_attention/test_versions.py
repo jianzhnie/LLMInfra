@@ -139,6 +139,47 @@ def test_fully_masked_rows_produce_zero_output(version):
 
 
 @pytest.mark.parametrize("version", MODULES.values(), ids=MODULES.keys())
+def test_masked_tiles_after_very_negative_scores_do_not_corrupt_state(version):
+    """A fully masked tile merged after valid tiles must be a no-op.
+
+    Regression test: the substitute block max (0) of a fully masked tile used
+    to raise the running row max of a row whose true scores are all below
+    ~-87, so ``exp(row_max - 0)`` underflowed (fp32) and wiped out the
+    accumulated output/normalizer, returning zeros or NaNs. Reachable with
+    plain causal attention: early query tiles merge fully masked future
+    key tiles.
+    """
+    q, k, v = make_qkv(2, 2, 96, 96, 32, 32, seed=0)
+    # Score magnitudes in the hundreds: early causal rows have a true row max
+    # far below -104, so exp(row_max) underflows fp32 if the max is corrupted.
+    q = q * 20
+    k = k * 20
+    generator = torch.Generator().manual_seed(2)
+    grad_out = torch.randn(2, 2, 96, 32, generator=generator)
+
+    ref_out, ref_grad_q, ref_grad_k, ref_grad_v = reference_with_grads(
+        q, k, v, causal=True, key_padding_mask=None, grad_out=grad_out
+    )
+
+    fwd = version.forward(q, k, v, causal=True, config=TILED_CONFIG)
+    assert torch.isfinite(fwd.out).all()
+    assert (fwd.out - ref_out).abs().max().item() <= 1e-3
+
+    # Gradients span ~30 in magnitude here (inputs scaled by 20), so compare
+    # against a relative tolerance; the regression being guarded against is
+    # wiped-out (all-zero) or NaN gradients, not last-bit rounding.
+    bwd = version.backward(q, k, v, grad_out, fwd, causal=True, config=TILED_CONFIG)
+    for grad, ref_grad in (
+        (bwd.grad_q, ref_grad_q),
+        (bwd.grad_k, ref_grad_k),
+        (bwd.grad_v, ref_grad_v),
+    ):
+        assert torch.isfinite(grad).all()
+        max_diff = (grad - ref_grad).abs().max().item()
+        assert max_diff <= 1e-4 + 1e-3 * ref_grad.abs().max().item()
+
+
+@pytest.mark.parametrize("version", MODULES.values(), ids=MODULES.keys())
 def test_mixed_input_dtypes_raise(version):
     """Mixed q/k/v dtypes must fail fast in forward instead of crashing in backward."""
     q, k, v = make_qkv(1, 2, 8, 8, 16, 16)

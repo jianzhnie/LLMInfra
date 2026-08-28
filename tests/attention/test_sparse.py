@@ -137,6 +137,32 @@ def test_block_sparse_rejects_out_of_range_block(bsa):
         bsa(make_hidden_state(BATCH, SEQ, HIDDEN), block_indices=indices)
 
 
+def test_block_sparse_rejects_negative_block(bsa):
+    """Negative block ids must raise ValueError, not scatter's RuntimeError."""
+    indices = torch.full((HEADS, (SEQ + 1) // 2, 1), -1, dtype=torch.long)
+    with pytest.raises(ValueError, match="out-of-range"):
+        bsa(make_hidden_state(BATCH, SEQ, HIDDEN), block_indices=indices)
+
+
+def test_block_sparse_causal_mask_right_aligns_longer_kv(bsa):
+    """With kv_len > q_len, query i is the global position i + kv_len - q_len."""
+    module = BlockSparseAttention(
+        HIDDEN, HEADS, block_size=1, top_k=8, dropout=0.0, causal=True
+    )
+    # Select every KV block explicitly so only the causal term can mask.
+    indices = torch.arange(6).expand(1, HEADS, 2, 6)
+    mask = module._build_mask(
+        batch_size=1,
+        q_len=2,
+        kv_len=6,
+        block_indices=indices,
+        device=torch.device("cpu"),
+    )
+    # Query 0 sits at global position 4 and sees keys 0..4; query 1 sees all.
+    expected = torch.tensor([[1, 1, 1, 1, 1, 0], [1, 1, 1, 1, 1, 1]], dtype=torch.bool)
+    assert (mask == expected[None, None]).all()
+
+
 def test_compressed_sparse_attention_shape_and_gradient():
     layer = CompressedSparseAttention(
         HIDDEN,
@@ -172,6 +198,28 @@ def test_csa_dense_causal_mask_matches_implicit_causal():
     ).eval()
     x = make_hidden_state(BATCH, 8, HIDDEN)
     causal_mask = torch.tril(torch.ones(BATCH, 1, 8, 8, dtype=torch.bool))
+
+    torch.testing.assert_close(module(x, attention_mask=causal_mask), module(x))
+
+
+def test_csa_accepts_3d_query_key_mask():
+    """A (batch, q_len, kv_len) mask is contract-valid and must not crash."""
+    module = CompressedSparseAttention(
+        HIDDEN, HEADS, compress_ratio=2, top_k=2, causal=True
+    ).eval()
+    x = make_hidden_state(BATCH, 8, HIDDEN)
+    causal_mask = torch.tril(torch.ones(BATCH, 8, 8, dtype=torch.bool))
+
+    torch.testing.assert_close(module(x, attention_mask=causal_mask), module(x))
+
+
+def test_csa_accepts_per_head_4d_mask():
+    """A (batch, heads, q_len, kv_len) causal mask must not crash either."""
+    module = CompressedSparseAttention(
+        HIDDEN, HEADS, compress_ratio=2, top_k=2, causal=True
+    ).eval()
+    x = make_hidden_state(BATCH, 8, HIDDEN)
+    causal_mask = torch.tril(torch.ones(BATCH, HEADS, 8, 8, dtype=torch.bool))
 
     torch.testing.assert_close(module(x, attention_mask=causal_mask), module(x))
 

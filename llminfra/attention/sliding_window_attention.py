@@ -22,6 +22,11 @@ class SlidingWindowAttention(BaseAttention):
         hidden_size: Dimensionality of input and output features.
         num_heads: Number of query heads.
         window_size: Number of past key/value positions visible to each query.
+            With ``causal=True`` a query therefore attends to
+            ``window_size + 1`` positions in total (itself included) — one
+            more than the ``sliding_window`` convention of Mistral and
+            HuggingFace transformers, which counts the query position as part
+            of the window.
         num_kv_groups: Number of shared key/value head groups. Defaults to
             ``num_heads``, which is plain MHA plus the window mask.
         dropout: Dropout probability for attention weights.

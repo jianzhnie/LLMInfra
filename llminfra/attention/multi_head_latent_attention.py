@@ -16,6 +16,12 @@ class MultiHeadLatentAttention(BaseAttention):
     produced by projecting the input down to a latent space and back up,
     allowing for more flexible and powerful attention patterns.
 
+    Simplifications relative to DeepSeek-V2/V3 MLA: there is no decoupled
+    RoPE key/query segment, no RMSNorm on the latent states, no YaRN mscale
+    adjustment, and the K/V head dims equal the Q head dim. The structure
+    (shared KV down-projection plus separate K/V up-projections) matches the
+    DeepSeek ``kv_a_proj_with_mqa``/``kv_b_proj`` decomposition.
+
     Args:
         hidden_size (int): Dimensionality of the input and output features.
         num_heads (int): Number of attention heads to use. Must divide

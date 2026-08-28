@@ -129,12 +129,13 @@ def _yarn_linear_ramp_mask(min_val: float, max_val: float, dim: int) -> torch.Te
 class YaRNScaledRotaryEmbedding(BasePositionalEncoding):
     """YaRN-scaled RoPE for long-context extension.
 
-    High-frequency dimensions are interpolated (frequencies divided by
-    ``params.factor``) while low-frequency dimensions keep their original
-    frequencies; a linear ramp blends the two regimes. This is a teaching
-    implementation of the interpolation/extrapolation blending formula.
-    Exact numerical behavior should be checked against Transformers and the
-    official YaRN repository.
+    High-frequency dimensions keep their original frequencies (extrapolation)
+    while low-frequency dimensions are interpolated (frequencies divided by
+    ``params.factor``); a linear ramp blends the two regimes, following the
+    YaRN paper (Peng et al., 2023) and the Transformers reference. This is a
+    teaching implementation of the interpolation/extrapolation blending
+    formula. Exact numerical behavior should be checked against Transformers
+    and the official YaRN repository.
     """
 
     def __init__(
@@ -181,7 +182,11 @@ class YaRNScaledRotaryEmbedding(BasePositionalEncoding):
         assert isinstance(ramp, torch.Tensor)
         extrapolation = base_inv_freq
         interpolation = base_inv_freq / self.params.factor
-        inv_freq = interpolation * (1.0 - ramp) + extrapolation * ramp
+        # ramp is 0 on high-frequency dims (below beta_fast's correction dim,
+        # which extrapolate) and 1 on low-frequency dims (above beta_slow's,
+        # which interpolate); swapping the two weights inverts the blend and
+        # contradicts the YaRN paper and the Transformers reference.
+        inv_freq = interpolation * ramp + extrapolation * (1.0 - ramp)
         # The table is built in float32 (like the reference kernels) so
         # half-precision inputs do not lose positional accuracy.
         positions = torch.arange(

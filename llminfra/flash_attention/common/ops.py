@@ -102,9 +102,26 @@ def merge_normalized_block(
     ``out`` is a float32 accumulator; ``weighted_values`` may be lower
     precision and is upcast on accumulation.
     """
-    new_row_max = torch.maximum(row_max, block_max)
-    old_scale = torch.exp(row_max - new_row_max)
-    new_scale = torch.exp(block_max - new_row_max)
+    has_contribution = block_sum > 0
+    new_row_max = torch.where(
+        has_contribution, torch.maximum(row_max, block_max), row_max
+    )
+    # Fully masked blocks (``block_sum == 0``) carry a substitute block max of
+    # 0 that must not raise the running row max: for a row whose true scores
+    # are all very negative, ``exp(row_max - 0)`` would underflow to zero (or
+    # produce inf ratios in the subnormal range) and wipe out the accumulated
+    # state. The where() overrides force the identity update for such rows, so
+    # the discarded exp() results (inf/nan) never leak into the state.
+    old_scale = torch.where(
+        has_contribution,
+        torch.exp(row_max - new_row_max),
+        torch.ones_like(row_max),
+    )
+    new_scale = torch.where(
+        has_contribution,
+        torch.exp(block_max - new_row_max),
+        torch.zeros_like(block_max),
+    )
     new_normalizer = old_scale * normalizer + new_scale * block_sum
 
     safe_normalizer = torch.where(
@@ -132,9 +149,26 @@ def merge_unnormalized_block(
     been merged. ``out_acc`` is a float32 accumulator; ``weighted_values``
     may be lower precision and is upcast on accumulation.
     """
-    new_row_max = torch.maximum(row_max, block_max)
-    old_scale = torch.exp(row_max - new_row_max)
-    new_scale = torch.exp(block_max - new_row_max)
+    has_contribution = block_sum > 0
+    new_row_max = torch.where(
+        has_contribution, torch.maximum(row_max, block_max), row_max
+    )
+    # Fully masked blocks (``block_sum == 0``) carry a substitute block max of
+    # 0 that must not raise the running row max: for a row whose true scores
+    # are all very negative, ``exp(row_max - 0)`` would underflow to zero (or
+    # produce inf ratios in the subnormal range) and wipe out the accumulated
+    # state. The where() overrides force the identity update for such rows, so
+    # the discarded exp() results (inf/nan) never leak into the state.
+    old_scale = torch.where(
+        has_contribution,
+        torch.exp(row_max - new_row_max),
+        torch.ones_like(row_max),
+    )
+    new_scale = torch.where(
+        has_contribution,
+        torch.exp(block_max - new_row_max),
+        torch.zeros_like(block_max),
+    )
     out_acc = old_scale * out_acc + new_scale * weighted_values
     normalizer = old_scale * normalizer + new_scale * block_sum
     return out_acc, normalizer, new_row_max

@@ -126,10 +126,12 @@ class CompressedSparseAttention(BaseAttention):
             # Compress the key mask to block granularity: a block stays
             # visible if any of its source tokens is valid.
             key_mask = attention_mask
-            if key_mask.dim() == 4:
-                # Reduce over query positions: a key stays visible if any
-                # query can attend to it (a pure causal mask has no padding).
-                key_mask = key_mask.any(dim=-2)
+            if key_mask.dim() > 2:
+                # Reduce over query (and head) positions: a key stays
+                # visible if any query can attend to it (a pure causal mask
+                # has no padding).
+                reduce_dims = tuple(range(1, key_mask.dim() - 1))
+                key_mask = key_mask.any(dim=reduce_dims)
             key_mask = key_mask.reshape(key_mask.size(0), -1).bool()
             key_blocks = key_mask.view(
                 batch_size, compressed_len, self.compress_ratio

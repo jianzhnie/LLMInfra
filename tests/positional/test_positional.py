@@ -65,7 +65,7 @@ def test_yarn_and_dynamic_ntk_are_finite():
     assert torch.isfinite(ntk(x)).all()
 
 
-def test_yarn_interpolates_high_and_keeps_low_frequencies():
+def test_yarn_interpolates_low_and_keeps_high_frequencies():
     params = YaRNParameters(
         factor=4.0,
         original_max_position_embeddings=2048,
@@ -75,14 +75,59 @@ def test_yarn_interpolates_high_and_keeps_low_frequencies():
     x = torch.randn(1, 1, 2, 8)
     yarn_out = yarn(x)
     plain_out = plain(x)
-    # The lowest-frequency pair keeps the original (unscaled) frequency.
-    torch.testing.assert_close(yarn_out[..., -2:], plain_out[..., -2:])
-    # The highest-frequency pair is interpolated: angle = position / factor.
-    a, b = x[0, 0, 1, 0], x[0, 0, 1, 1]
-    theta = 1.0 / params.factor  # inv_freq[0] == 1
+    # The highest-frequency pair keeps the original (unscaled) frequency.
+    torch.testing.assert_close(yarn_out[..., :2], plain_out[..., :2])
+    # The lowest-frequency pair is interpolated: angle = position * f / factor.
+    a, b = x[0, 0, 1, -2], x[0, 0, 1, -1]
+    theta = 10000.0 ** (-6 / 8) / params.factor  # inv_freq[-1] / factor
     cos, sin = math.cos(theta), math.sin(theta)
     expected = torch.stack([a * cos - b * sin, a * sin + b * cos])
-    torch.testing.assert_close(yarn_out[0, 0, 1, :2], expected)
+    torch.testing.assert_close(yarn_out[0, 0, 1, -2:], expected)
+
+
+def test_yarn_blend_matches_reference_formula():
+    """The per-dimension blend must follow the YaRN paper / Transformers.
+
+    Regression test: the interpolation/extrapolation weights were swapped,
+    so high-frequency dimensions were scaled instead of kept and
+    low-frequency dimensions were left unscaled (the inverse of YaRN's
+    ramp in ``modeling_rope_utils._compute_yarn_parameters``).
+    """
+    dim, base, orig, factor = 64, 10000.0, 4096, 4.0
+    params = YaRNParameters(
+        factor=factor,
+        original_max_position_embeddings=orig,
+        beta_fast=32.0,
+        beta_slow=1.0,
+    )
+    yarn = YaRNScaledRotaryEmbedding(
+        dim, max_seq_len=orig * int(factor), params=params, base=base
+    )
+
+    # Recover the effective inv_freq: angle at position 1 (all < pi/2).
+    # atan2 stays accurate for tiny angles where arccos(cos) degenerates.
+    cos, sin = yarn._build_cos_sin(2)
+    inv_freq = torch.atan2(sin[1], cos[1])
+
+    # Independent reimplementation of the reference blend (no truncation).
+    base_inv = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float64) / dim))
+    half = dim // 2
+
+    def correction_dim(rotations: float) -> float:
+        return dim * math.log(orig / (rotations * 2 * math.pi)) / (2 * math.log(base))
+
+    low = max(0.0, min(correction_dim(params.beta_fast), half - 1))
+    high = max(0.0, min(correction_dim(params.beta_slow), half - 1))
+    indices = torch.arange(half, dtype=torch.float64)
+    ramp = (1.0 - ((high - indices) / (high - low)).clamp(0.0, 1.0)).double()
+    expected = (base_inv / factor) * ramp + base_inv * (1.0 - ramp)
+
+    torch.testing.assert_close(inv_freq.double(), expected, atol=1e-5, rtol=1e-4)
+    # High-frequency dims extrapolate; low-frequency dims interpolate.
+    torch.testing.assert_close(inv_freq[0].double(), base_inv[0], atol=1e-6, rtol=1e-5)
+    torch.testing.assert_close(
+        inv_freq[-1].double(), base_inv[-1] / factor, atol=1e-6, rtol=1e-5
+    )
 
 
 def test_dynamic_ntk_requires_dim_greater_than_two():
