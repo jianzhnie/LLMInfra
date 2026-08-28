@@ -30,6 +30,12 @@ class MultiHeadAttention(BaseAttention):
             over the head dimension (parameter-free, Qwen3-style) after
             splitting heads and before computing attention scores.
             Defaults to False.
+        logit_softcap (float, optional): Gemma 2 style logit soft-capping.
+            When set, scores become ``softcap * tanh(scores / softcap)``
+            before masking and softmax. Defaults to None (disabled).
+        attention_sink (bool, optional): Whether to add one learnable sink
+            logit per head to the softmax denominator (GPT-OSS /
+            StreamingLLM style). Defaults to False.
 
     Attributes:
         num_heads (int): Number of attention heads.
@@ -50,8 +56,18 @@ class MultiHeadAttention(BaseAttention):
         dropout: float = 0.1,
         bias: bool = True,
         qk_norm: bool = False,
+        logit_softcap: float | None = None,
+        attention_sink: bool = False,
     ) -> None:
-        super().__init__(hidden_size, num_heads, dropout, bias, qk_norm)
+        super().__init__(
+            hidden_size,
+            num_heads,
+            dropout,
+            bias,
+            qk_norm,
+            logit_softcap=logit_softcap,
+            attention_sink=attention_sink,
+        )
 
         # Projection matrices for Q, K, V
         self.q_proj = nn.Linear(hidden_size, hidden_size, bias=bias)

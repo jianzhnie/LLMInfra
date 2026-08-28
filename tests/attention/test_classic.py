@@ -265,3 +265,81 @@ def test_ring_attention_rejects_attention_mask():
             make_hidden_state(BATCH, SEQ, HIDDEN),
             attention_mask=make_causal_mask(BATCH, SEQ),
         )
+
+
+def test_mha_logit_softcap_matches_manual_reference():
+    # Gemma 2 style: softcap * tanh(scores / softcap) before softmax.
+    softcap = 1.0
+    mha = MultiHeadAttention(HIDDEN, HEADS, dropout=0.0, logit_softcap=softcap)
+    x = make_hidden_state(BATCH, SEQ, HIDDEN) * 20  # large logits
+    out, weights = mha(x, return_attention_weights=True)
+
+    q = mha.split_head(mha.q_proj(x))
+    k = mha.split_head(mha.k_proj(x))
+    v = mha.split_head(mha.v_proj(x))
+    scores = q @ k.transpose(-1, -2) * mha.scale_factor
+    scores = softcap * torch.tanh(scores / softcap)
+    ref_weights = torch.softmax(scores, dim=-1)
+    torch.testing.assert_close(weights, ref_weights)
+    ref_out = mha.o_proj(mha.combine_head(ref_weights @ v))
+    torch.testing.assert_close(out, ref_out)
+
+
+def test_mha_logit_softcap_bounds_scores():
+    softcap = 0.5
+    mha = MultiHeadAttention(HIDDEN, HEADS, dropout=0.0, logit_softcap=softcap)
+    x = make_hidden_state(BATCH, SEQ, HIDDEN) * 100
+    _, weights = mha(x, return_attention_weights=True)
+    # With |scores| <= softcap the softmax is near-uniform; a hard argmax win
+    # would show up as weights close to 1.
+    assert weights.max().item() < 0.5
+    with pytest.raises(ValueError, match="logit_softcap"):
+        MultiHeadAttention(HIDDEN, HEADS, logit_softcap=0.0)
+
+
+def test_mha_attention_sink_absorbs_probability_mass():
+    # bias=False keeps the output a pure weighted value sum, so a dominant
+    # sink must drive it to zero.
+    mha = MultiHeadAttention(
+        HIDDEN, HEADS, dropout=0.0, bias=False, attention_sink=True
+    )
+    assert mha.sink_logits is not None
+    with torch.no_grad():
+        # A dominant sink logit should pull most of the softmax mass away
+        # from the real keys.
+        mha.sink_logits.fill_(50.0)
+    x = make_hidden_state(BATCH, SEQ, HIDDEN)
+    out, weights = mha(x, return_attention_weights=True)
+    assert weights.shape == (BATCH, HEADS, SEQ, SEQ)  # sink column sliced off
+    assert weights.sum(dim=-1).max().item() < 1e-3
+    torch.testing.assert_close(out, torch.zeros_like(out), atol=1e-3, rtol=0)
+
+
+def test_mha_attention_sink_matches_manual_softmax_denominator():
+    mha = MultiHeadAttention(HIDDEN, HEADS, dropout=0.0, attention_sink=True)
+    with torch.no_grad():
+        mha.sink_logits.copy_(torch.randn(HEADS))
+    x = make_hidden_state(BATCH, SEQ, HIDDEN)
+    _, weights = mha(x, return_attention_weights=True)
+
+    q = mha.split_head(mha.q_proj(x))
+    k = mha.split_head(mha.k_proj(x))
+    scores = q @ k.transpose(-1, -2) * mha.scale_factor
+    sink = mha.sink_logits.view(1, -1, 1, 1).expand_as(scores[..., :1])
+    ref = torch.softmax(torch.cat([scores, sink], dim=-1), dim=-1)[..., :-1]
+    torch.testing.assert_close(weights, ref)
+
+
+def test_mha_attention_sink_keeps_fully_masked_rows_finite():
+    # bias=False so a fully masked row (all mass on the sink) is exactly 0.
+    mha = MultiHeadAttention(
+        HIDDEN, HEADS, dropout=0.0, bias=False, attention_sink=True
+    )
+    x = make_hidden_state(BATCH, SEQ, HIDDEN).requires_grad_(True)
+    mask = torch.ones(BATCH, 1, SEQ, SEQ, dtype=torch.bool)
+    mask[0] = False  # batch 0 is fully masked
+    out = mha(x, attention_mask=mask)
+    assert torch.isfinite(out).all()
+    torch.testing.assert_close(out[0], torch.zeros_like(out[0]), atol=1e-6, rtol=0)
+    out.sum().backward()
+    assert x.grad is not None and torch.isfinite(x.grad).all()

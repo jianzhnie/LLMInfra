@@ -24,6 +24,8 @@ class BaseAttention(nn.Module, ABC):
         dropout: float = 0.0,
         bias: bool = True,
         qk_norm: bool = False,
+        logit_softcap: float | None = None,
+        attention_sink: bool = False,
     ) -> None:
         """Initialize base attention parameters.
 
@@ -36,9 +38,19 @@ class BaseAttention(nn.Module, ABC):
                 head dimension after :meth:`split_head` and before the
                 attention scores are computed (parameter-free, Qwen3-style).
                 Subclasses opt in by calling :meth:`_apply_qk_norm`.
+            logit_softcap: Optional Gemma 2 style logit soft-capping value.
+                Scores become ``softcap * tanh(scores / softcap)`` before
+                masking and softmax.
+            attention_sink: Whether to append one learnable sink logit per
+                head to the softmax denominator (GPT-OSS / StreamingLLM
+                style). The sink absorbs probability mass without contributing
+                to the output, so attention weights over real keys may sum to
+                less than 1.
 
         Raises:
-            ValueError: If hidden_size is not divisible by num_heads
+            ValueError: If hidden_size is not divisible by num_heads, or if
+                ``logit_softcap`` is not positive.
+
         """
         super().__init__()
 
@@ -47,6 +59,8 @@ class BaseAttention(nn.Module, ABC):
                 f"hidden_size ({hidden_size}) must be divisible "
                 f"by num_heads ({num_heads})"
             )
+        if logit_softcap is not None and logit_softcap <= 0:
+            raise ValueError(f"logit_softcap must be > 0, got {logit_softcap}")
 
         self.hidden_size = hidden_size
         self.num_heads = num_heads
@@ -54,12 +68,19 @@ class BaseAttention(nn.Module, ABC):
         self.dropout_prob = dropout
         self.bias = bias
         self.qk_norm = qk_norm
+        self.logit_softcap = logit_softcap
 
         # Pre-compute scaling factor for efficiency
         self.scale_factor = 1.0 / math.sqrt(self.head_dim)
 
         # Dropout layer
         self.dropout = nn.Dropout(dropout)
+
+        self.sink_logits: nn.Parameter | None
+        if attention_sink:
+            self.sink_logits = nn.Parameter(torch.zeros(num_heads))
+        else:
+            self.sink_logits = None
 
     @abstractmethod
     def forward(
@@ -182,16 +203,34 @@ class BaseAttention(nn.Module, ABC):
         Returns:
             Normalized attention weights. When ``attention_mask`` is given,
             rows whose keys are all masked are defined to be all-zero
-            (softmax over all ``-inf`` would be NaN).
+            (softmax over all ``-inf`` would be NaN). With
+            ``attention_sink`` enabled the sink logit keeps every row finite,
+            so masked rows simply put all their mass on the sink and the
+            returned weights over real keys are still all-zero.
 
         """
+        if self.logit_softcap is not None:
+            # Gemma 2 order: soft-cap the raw scores first, then mask.
+            cap = self.logit_softcap
+            attention_scores = cap * torch.tanh(attention_scores / cap)
         attention_scores = self.apply_attention_mask(attention_scores, attention_mask)
-        attention_weights: torch.Tensor = torch.softmax(attention_scores, dim=-1)
-        if attention_mask is not None:
-            # Fully masked rows produce NaN in the softmax; define their
-            # weights (and therefore their output) as zero instead. Without a
-            # mask no row can be fully masked, so skip the extra full pass.
-            attention_weights = torch.nan_to_num(attention_weights, nan=0.0)
+        attention_weights: torch.Tensor
+        if self.sink_logits is not None:
+            # Append one learnable sink logit per head as an extra key column;
+            # it takes part in the softmax but is sliced off afterwards, so
+            # it never contributes to the weighted value sum.
+            sink = self.sink_logits.to(attention_scores.dtype)
+            sink = sink.view(1, -1, 1, 1).expand(*attention_scores.shape[:-1], 1)
+            scores_with_sink = torch.cat([attention_scores, sink], dim=-1)
+            attention_weights = torch.softmax(scores_with_sink, dim=-1)[..., :-1]
+        else:
+            attention_weights = torch.softmax(attention_scores, dim=-1)
+            if attention_mask is not None:
+                # Fully masked rows produce NaN in the softmax; define their
+                # weights (and therefore their output) as zero instead.
+                # Without a mask no row can be fully masked, so skip the
+                # extra full pass.
+                attention_weights = torch.nan_to_num(attention_weights, nan=0.0)
         attention_weights = self.dropout(attention_weights)
         return attention_weights
 

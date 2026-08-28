@@ -15,7 +15,7 @@ import torch
 from torch import nn
 from torch.func import functional_call
 
-QuantizationMode = Literal["int4", "int8", "fp8_e4m3"]
+QuantizationMode = Literal["int4", "int8", "fp8_e4m3", "mxfp4"]
 
 
 @dataclass(frozen=True)
@@ -23,7 +23,11 @@ class QuantizationConfig:
     """Configuration for fake quantization.
 
     Args:
-        mode: Target numerical format.
+        mode: Target numerical format. ``"mxfp4"`` is the OCP Microscaling
+            FP4 format (E2M1 elements with a shared power-of-two E8M0 scale
+            per 32-element block, as used by GPT-OSS); it always operates on
+            32-element blocks along the last axis and ignores
+            ``per_channel``/``channel_axis``.
         per_channel: Compute one scale per channel instead of one scale for
             the entire tensor. This is most useful for weight tensors.
         channel_axis: Axis retained when ``per_channel=True``.
@@ -44,7 +48,7 @@ class QuantizationConfig:
 
     def __post_init__(self) -> None:
         """Reject unsupported modes and non-positive ``eps`` values."""
-        if self.mode not in {"int4", "int8", "fp8_e4m3"}:
+        if self.mode not in {"int4", "int8", "fp8_e4m3", "mxfp4"}:
             raise ValueError(f"Unsupported quantization mode: {self.mode!r}")
         if self.eps <= 0:
             raise ValueError("eps must be > 0")
@@ -64,6 +68,8 @@ class FakeQuantizer(nn.Module):
         with torch.no_grad():
             if self.config.mode == "fp8_e4m3":
                 quantized = self._fake_fp8_e4m3(tensor)
+            elif self.config.mode == "mxfp4":
+                quantized = self._fake_mxfp4(tensor)
             else:
                 bits = 4 if self.config.mode == "int4" else 8
                 quantized = self._fake_symmetric_integer(tensor, bits)
@@ -119,6 +125,39 @@ class FakeQuantizer(nn.Module):
         # Zero inputs round to exactly zero on their own (0 / step == 0), so
         # no explicit ``where`` masking is needed.
         return rounded
+
+    @staticmethod
+    def _fake_mxfp4(tensor: torch.Tensor) -> torch.Tensor:
+        """Simulate OCP Microscaling FP4 (MXFP4) without FP4 hardware.
+
+        Elements use the E2M1 format (magnitudes 0, 0.5, 1, 1.5, 2, 3, 4, 6)
+        and share one power-of-two E8M0 scale per 32-element block along the
+        last axis. The scale is chosen as ``2 ** floor(log2(max_abs / 6))``
+        so the block maximum maps inside the representable range without
+        saturation.
+        """
+        block_size = 32
+        # Magnitudes representable in E2M1 (sign is applied separately).
+        levels = torch.tensor(
+            [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0],
+            dtype=tensor.dtype,
+            device=tensor.device,
+        )
+        last_dim = tensor.size(-1)
+        pad = (-last_dim) % block_size
+        padded = torch.nn.functional.pad(tensor, (0, pad)) if pad else tensor
+        blocks = padded.reshape(*padded.shape[:-1], -1, block_size)
+
+        max_abs = blocks.abs().amax(dim=-1, keepdim=True)
+        safe_max = max_abs.clamp_min(torch.finfo(tensor.dtype).tiny)
+        scale = torch.exp2(torch.floor(torch.log2(safe_max / 6.0)))
+        normalized = (blocks / scale).abs()
+        # Round to the nearest E2M1 magnitude.
+        nearest = (normalized.unsqueeze(-1) - levels).abs().argmin(dim=-1)
+        quantized = levels[nearest] * blocks.sign() * scale
+
+        quantized = quantized.reshape(*padded.shape)
+        return quantized[..., :last_dim] if pad else quantized
 
     def extra_repr(self) -> str:
         """Show the quantizer mode and channel configuration in ``repr``."""

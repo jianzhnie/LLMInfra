@@ -7,7 +7,7 @@ from torch import nn
 from llminfra import FakeQuantizer, QuantizationConfig, build_quantized
 
 
-@pytest.mark.parametrize("mode", ["int4", "int8", "fp8_e4m3"])
+@pytest.mark.parametrize("mode", ["int4", "int8", "fp8_e4m3", "mxfp4"])
 def test_fake_quantizer_is_finite_and_preserves_gradient(mode: str):
     quantizer = FakeQuantizer(QuantizationConfig(mode=mode))
     x = torch.linspace(-10, 10, 33, requires_grad=True)
@@ -95,3 +95,38 @@ def test_qat_wrapper_can_skip_input_and_weight_quantization():
     # With inputs and weights untouched, only the output is fake-quantized.
     reference = FakeQuantizer(QuantizationConfig(mode="int8"))(module(x))
     torch.testing.assert_close(wrapped(x), reference)
+
+
+def test_mxfp4_quantizes_to_e2m1_grid():
+    """With block max_abs = 6 the shared scale is 1 and values snap to E2M1."""
+    values = torch.zeros(32)
+    values[0] = 6.0  # block max -> scale = 2 ** floor(log2(6/6)) = 1
+    values[1] = 0.4  # -> 0.5
+    values[2] = 1.2  # -> 1.0
+    values[3] = 1.8  # -> 2.0
+    values[4] = -2.6  # -> -3.0
+    values[5] = 4.9  # -> 4.0
+    quantized = FakeQuantizer(QuantizationConfig(mode="mxfp4"))(values)
+    expected = torch.zeros(32)
+    expected[0:6] = torch.tensor([6.0, 0.5, 1.0, 2.0, -3.0, 4.0])
+    torch.testing.assert_close(quantized, expected)
+
+
+def test_mxfp4_block_scales_are_independent_powers_of_two():
+    """Each 32-element block gets its own power-of-two E8M0 scale."""
+    values = torch.zeros(64)
+    values[0] = 48.0  # block 0: scale = 2 ** floor(log2(48/6)) = 8
+    values[1] = 24.0  # 24 / 8 = 3 is exactly representable
+    values[32] = 0.4  # block 1 max -> scale = 2 ** floor(log2(0.4/6)) = 1/16
+    # 0.4 / (1/16) = 6.4 -> nearest E2M1 magnitude 6 -> 6/16 = 0.375
+    quantized = FakeQuantizer(QuantizationConfig(mode="mxfp4"))(values)
+    assert quantized[0].item() == 48.0
+    assert quantized[1].item() == 24.0
+    assert quantized[32].item() == 0.375
+
+
+def test_mxfp4_preserves_shape_for_ragged_last_dim():
+    x = torch.randn(2, 33, generator=torch.Generator().manual_seed(0))
+    quantized = FakeQuantizer(QuantizationConfig(mode="mxfp4"))(x)
+    assert quantized.shape == x.shape
+    assert torch.isfinite(quantized).all()
