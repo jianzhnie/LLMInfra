@@ -58,6 +58,7 @@ from .generation import (
     TopKLogitsProcessor,
     TopPLogitsProcessor,
     generate,
+    generate_with_cache,
 )
 from .inference import (
     BlockSparseIndexer,
@@ -298,6 +299,7 @@ __all__ = [
     "distributed_ring_attention",
     "flash_attention",
     "generate",
+    "generate_with_cache",
     "get_activation",
     "get_longrope_preset",
     "list_attentions",

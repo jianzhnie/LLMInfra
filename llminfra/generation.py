@@ -319,10 +319,10 @@ def generate_with_cache(
 
     sequences = input_ids
     finished = torch.zeros(sequences.size(0), dtype=torch.bool, device=sequences.device)
-    past: CacheState | None = None
+    past_key_values: CacheState | None = None
     tokens = input_ids  # prefill consumes the full prompt
     for _ in range(max_new_tokens):
-        logits, past = step_fn(tokens, past)
+        logits, past_key_values = step_fn(tokens, past_key_values)
         if processors is not None and len(processors) > 0:
             logits = processors(logits, sequences)
         if temperature <= 0.0:

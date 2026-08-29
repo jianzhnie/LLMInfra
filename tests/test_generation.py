@@ -12,10 +12,10 @@ from llminfra.generation import (
     RepetitionPenaltyLogitsProcessor,
     TopKLogitsProcessor,
     TopPLogitsProcessor,
+    generate_with_cache,
 )
 from llminfra.generation import (
     generate as standalone_generate,
-    generate_with_cache,
 )
 
 
@@ -349,9 +349,10 @@ def test_generate_with_cache_prefill_then_single_token_steps():
         return _toy_logits(seen), seen
 
     generate_with_cache(step, torch.tensor([[0, 0, 0]]), max_new_tokens=4)
-    # One prefill with the full prompt, then one (batch, 1) call per step.
+    # One prefill with the full prompt, then one (batch, 1) call per step
+    # except the last: the final generated token needs no further forward.
     assert shapes[0] == (1, 3)
-    assert shapes[1:] == [(1, 1)] * 4
+    assert shapes[1:] == [(1, 1)] * 3
 
 
 def test_generate_with_cache_eos_pads_finished_rows():
@@ -389,7 +390,8 @@ def test_generate_with_cache_matches_causal_lm_cache_path():
 
     def step(tokens: torch.Tensor, past: object | None):
         logits, new_past = model._forward_with_cache(
-            tokens, past  # type: ignore[arg-type]
+            tokens,
+            past,  # type: ignore[arg-type]
         )
         return logits[:, -1], new_past
 

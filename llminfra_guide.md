@@ -90,6 +90,7 @@
 | MinPLogitsProcessor | Min-p 采样 | [Paper](https://arxiv.org/abs/2407.01082)、[transformers](https://github.com/huggingface/transformers/blob/main/src/transformers/generation/logits_process.py) |
 | RepetitionPenaltyLogitsProcessor | CTRL 重复惩罚 | [Paper: CTRL](https://arxiv.org/abs/1909.05858)、[transformers](https://github.com/huggingface/transformers/blob/main/src/transformers/generation/logits_process.py) |
 | generate(贪心/采样) | 自回归解码基线 | 教学基线实现;对照 [transformers](https://github.com/huggingface/transformers/blob/main/src/transformers/generation/utils.py) 的 greedy/sample 路径 |
+| generate_with_cache(贪心/采样 + KV cache) | KV cache 增量解码 | 同上;prefill 一次 + 每步单 token,与 `generate` 逐 token 等价(有对拍测试) |
 
 ### Layers(`llminfra/layers/`)
 
