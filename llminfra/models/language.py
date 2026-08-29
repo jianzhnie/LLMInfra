@@ -10,6 +10,14 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from ..generation import (
+    LogitsProcessorList,
+    MinPLogitsProcessor,
+    RepetitionPenaltyLogitsProcessor,
+    TopKLogitsProcessor,
+    TopPLogitsProcessor,
+    beam_search,
+)
 from ..layers.feed_forward import SwiGLUFFN
 from ..layers.normalization import RMSNorm
 from ..layers.transformer_block import TransformerBlock
@@ -397,6 +405,11 @@ class CausalLMModel(nn.Module):
         pad_token_id: int = 0,
         draft_model: Callable[[torch.Tensor], torch.Tensor] | None = None,
         num_speculative_tokens: int = 4,
+        top_k: int = 0,
+        top_p: float = 1.0,
+        min_p: float = 0.0,
+        repetition_penalty: float = 1.0,
+        num_beams: int = 1,
     ) -> GenerateOutput:
         """Generate tokens autoregressively from a prompt.
 
@@ -422,9 +435,31 @@ class CausalLMModel(nn.Module):
                 them. Draft/accept counts are reported on the returned
                 output. With greedy decoding and a draft identical to the
                 target, the generated tokens match plain greedy decoding
-                exactly (speculative decoding is lossless).
+                exactly (speculative decoding is lossless). The speculative
+                decoder performs its own sampling, so combining
+                ``draft_model`` with ``top_k``, ``top_p``, ``min_p``,
+                ``repetition_penalty`` or ``num_beams > 1`` is rejected.
             num_speculative_tokens: Draft tokens proposed per speculative
                 step. Only used when ``draft_model`` is given.
+            top_k: Keep only the ``top_k`` highest-probability tokens before
+                sampling (``0`` disables, see
+                :class:`llminfra.generation.TopKLogitsProcessor`). Also
+                constrains greedy decoding and beam-search candidates.
+            top_p: Nucleus sampling: keep the smallest token set whose
+                cumulative probability exceeds ``top_p`` (``1.0`` disables,
+                see :class:`llminfra.generation.TopPLogitsProcessor`).
+            min_p: Keep tokens with probability at least ``min_p`` times the
+                top token's probability (``0.0`` disables, see
+                :class:`llminfra.generation.MinPLogitsProcessor`).
+            repetition_penalty: Penalize already-seen tokens (prompt
+                included): positive logits are divided and negative logits
+                multiplied by this factor (``1.0`` disables, see
+                :class:`llminfra.generation.RepetitionPenaltyLogitsProcessor`).
+            num_beams: Beam width. The default ``1`` uses greedy/temperature
+                sampling; values above 1 switch to beam search with GNMT
+                length normalization (see
+                :func:`llminfra.generation.beam_search`), which requires
+                ``temperature == 0`` and no ``draft_model``.
 
         Returns:
             A :class:`GenerateOutput` whose ``sequences`` have shape
@@ -444,6 +479,30 @@ class CausalLMModel(nn.Module):
             raise ValueError("max_new_tokens must be >= 1")
         if temperature < 0:
             raise ValueError("temperature must be >= 0")
+        if top_k < 0:
+            raise ValueError("top_k must be >= 0")
+        if not 0.0 < top_p <= 1.0:
+            raise ValueError("top_p must be in (0, 1]")
+        if not 0.0 <= min_p <= 1.0:
+            raise ValueError("min_p must be in [0, 1]")
+        if repetition_penalty <= 0.0:
+            raise ValueError("repetition_penalty must be > 0")
+        if num_beams < 1:
+            raise ValueError("num_beams must be >= 1")
+        if num_beams > 1 and temperature != 0.0:
+            raise ValueError(
+                "beam search (num_beams > 1) is mutually exclusive with "
+                "temperature sampling; use temperature == 0"
+            )
+        if num_beams > 1 and draft_model is not None:
+            raise ValueError("beam search cannot be combined with draft_model")
+        if draft_model is not None and (
+            top_k > 0 or top_p < 1.0 or min_p > 0.0 or repetition_penalty != 1.0
+        ):
+            raise ValueError(
+                "draft_model cannot be combined with top_k, top_p, min_p or "
+                "repetition_penalty"
+            )
         prompt_len = input_ids.size(1)
         # The final forward pass sees the prompt plus every generated token
         # except the last one; a speculative step additionally appends the
@@ -458,6 +517,29 @@ class CausalLMModel(nn.Module):
             raise ValueError(
                 f"generation could reach length {worst_case_len}, which "
                 f"exceeds max_seq_len {self.max_seq_len}"
+            )
+
+        processors = LogitsProcessorList()
+        if repetition_penalty != 1.0:
+            processors.append(RepetitionPenaltyLogitsProcessor(repetition_penalty))
+        if top_k > 0:
+            processors.append(TopKLogitsProcessor(top_k))
+        if top_p < 1.0:
+            processors.append(TopPLogitsProcessor(top_p))
+        if min_p > 0.0:
+            processors.append(MinPLogitsProcessor(min_p))
+
+        if num_beams > 1:
+            return GenerateOutput(
+                sequences=beam_search(
+                    lambda ids: self(ids)[:, -1],
+                    input_ids,
+                    num_beams=num_beams,
+                    max_new_tokens=max_new_tokens,
+                    eos_token_id=eos_token_id,
+                    pad_token_id=pad_token_id,
+                    processors=processors if processors else None,
+                )
             )
 
         decoder: SpeculativeDecoder | None = None
@@ -476,6 +558,8 @@ class CausalLMModel(nn.Module):
         while sequences.size(1) - prompt_len < max_new_tokens:
             if decoder is None:
                 logits = self(sequences)[:, -1]
+                if processors:
+                    logits = processors(logits, sequences)
                 next_token = self._sample_token(logits, temperature)
                 sequences = torch.cat([sequences, next_token[:, None]], dim=-1)
             else:

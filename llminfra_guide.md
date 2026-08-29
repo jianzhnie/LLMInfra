@@ -81,6 +81,16 @@
 | BlockDiffusionDrafter / DFlashDecoder / dflash_loss | DFlash 块扩散起草 | [Paper](https://arxiv.org/abs/2602.06036) §4;transformers 无对应实现 |
 | DSparkDecoder / DSparkScheduler | DSpark 式动态块长调度 | 无公开论文; docstring 自述为可移植调度接口 |
 
+### Generation(`llminfra/generation.py`,已接入 `CausalLMModel.generate`)
+
+| 模块 | 对应 | 参考 |
+| --- | --- | --- |
+| TopKLogitsProcessor | Top-k 采样 | [Paper: Fan et al. 2018](https://arxiv.org/abs/1805.04833)、[transformers](https://github.com/huggingface/transformers/blob/main/src/transformers/generation/logits_process.py) |
+| TopPLogitsProcessor | Nucleus 采样 | [Paper: Holtzman 2019](https://arxiv.org/abs/1904.09751)、[transformers](https://github.com/huggingface/transformers/blob/main/src/transformers/generation/logits_process.py) |
+| MinPLogitsProcessor | Min-p 采样 | [Paper](https://arxiv.org/abs/2407.01082)、[transformers](https://github.com/huggingface/transformers/blob/main/src/transformers/generation/logits_process.py) |
+| RepetitionPenaltyLogitsProcessor | CTRL 重复惩罚 | [Paper: CTRL](https://arxiv.org/abs/1909.05858)、[transformers](https://github.com/huggingface/transformers/blob/main/src/transformers/generation/logits_process.py) |
+| beam_search(GNMT length penalty) | 经典束搜索 | [Paper: GNMT](https://arxiv.org/abs/1609.08144)、[transformers](https://github.com/huggingface/transformers/blob/main/src/transformers/generation/utils.py) |
+
 ### Layers(`llminfra/layers/`)
 
 | 模块 | 对应模型 | 参考 |
@@ -109,6 +119,7 @@ transformers 无手写 FA 内核,权威参照为论文公式、[官方 CUDA 实�
 | 模块 | 对应 | 参考 |
 | --- | --- | --- |
 | PagedKVBlockAllocator / PagedAttentionCache / paged_attention | vLLM PagedAttention | [Paper](https://arxiv.org/abs/2309.06180)、[Code: vLLM](https://github.com/vllm-project/vllm);数值对照 SDPA |
+| QuantizedKVCache / quantized_paged_attention | KIVI / KVQuant 式量化 KV cache | [Paper: KIVI](https://arxiv.org/abs/2402.02750)、[KVQuant](https://arxiv.org/abs/2401.18079);per-channel K + per-token V,int8/int4,全精度 residual 缓冲区 |
 | OnDiskKVStore / TieredKVCache | vLLM swap 机制近似 | [Paper](https://arxiv.org/abs/2309.06180) §4.4 |
 | BlockSparseIndexer(inference) | NSA 式块选择 | [Paper](https://arxiv.org/abs/2502.11089) |
 | FakeQuantizer / QuantizationConfig / QATWrapper | PyTorch fake-quant/QAT 标准;`mxfp4` ↔ GPT-OSS;`nvfp4` ↔ Blackwell 系 NVFP4 | [Code: torch.ao.quantization](https://github.com/pytorch/pytorch/blob/main/torch/ao/quantization/fake_quantize.py)、[Paper: STE](https://arxiv.org/abs/1308.3432)、[GPT-OSS(MXFP4)](https://arxiv.org/abs/2508.10925)、OCP Microscaling(MX)规范、原生 `torch.float8_e4m3fn`(OCP FP8) |

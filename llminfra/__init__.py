@@ -12,8 +12,9 @@ The package is organized into subpackages by role:
 - `spec_decode`: N-Gram, EAGLE, Medusa, MTP and DSpark decoding
 
 `quantization` provides fake-quantization/QAT wrappers, `optimizers` the
-Muon/MuonClip optimizers, and `module_registry` the public `build_*` /
-`list_*` factories.
+Muon/MuonClip optimizers, `generation` the sampling logits processors and
+beam search, and `module_registry` the public `build_*` / `list_*`
+factories.
 
 All public names are re-exported here, so ``from llminfra import X`` works
 regardless of the internal layout.
@@ -49,13 +50,25 @@ from .attention import (
     ring_attention,
 )
 from .flash_attention import FlashAttention, flash_attention
+from .generation import (
+    LogitsProcessor,
+    LogitsProcessorList,
+    MinPLogitsProcessor,
+    RepetitionPenaltyLogitsProcessor,
+    TopKLogitsProcessor,
+    TopPLogitsProcessor,
+    beam_search,
+)
 from .inference import (
     BlockSparseIndexer,
     OnDiskKVStore,
     PagedAttentionCache,
     PagedKVBlockAllocator,
+    QuantizedChunk,
+    QuantizedKVCache,
     TieredKVCache,
     paged_attention,
+    quantized_paged_attention,
 )
 from .layers import (
     ACTIVATIONS,
@@ -216,6 +229,8 @@ __all__ = [
     "LearnedAbsolutePositionEmbedding",
     "LightningAttention",
     "LinearAttention",
+    "LogitsProcessor",
+    "LogitsProcessorList",
     "LongRoPEPreset",
     "LongRoPEScaledRotaryEmbedding",
     "MTPDecoder",
@@ -223,6 +238,7 @@ __all__ = [
     "Mamba2State",
     "ManifoldConstrainedHyperConnection",
     "MedusaHead",
+    "MinPLogitsProcessor",
     "MiniMaxSparseAttention",
     "MixtureOfExperts",
     "MultiHeadAttention",
@@ -244,10 +260,13 @@ __all__ = [
     "PrefixLMModel",
     "QATWrapper",
     "QuantizationConfig",
+    "QuantizedChunk",
+    "QuantizedKVCache",
     "QueryKeyBlockIndexer",
     "RMSNorm",
     "RWKVLayer",
     "ReGLUFFN",
+    "RepetitionPenaltyLogitsProcessor",
     "Retention",
     "RewardModelHead",
     "RingAttention",
@@ -261,13 +280,16 @@ __all__ = [
     "TTTLayer",
     "TieredKVCache",
     "TokenClassificationHead",
+    "TopKLogitsProcessor",
     "TopKRouter",
+    "TopPLogitsProcessor",
     "TransformerBlock",
     "TwoDimensionalPositionEmbedding",
     "VisionEncoderAdapter",
     "YaRNParameters",
     "YaRNScaledRotaryEmbedding",
     "apply_rotary_pos_emb",
+    "beam_search",
     "build_attention",
     "build_feed_forward",
     "build_multimodal_position_ids",
@@ -285,6 +307,7 @@ __all__ = [
     "mtp_loss",
     "paged_attention",
     "pool_hidden_state",
+    "quantized_paged_attention",
     "register_longrope_preset",
     "ring_attention",
     "router_z_loss",

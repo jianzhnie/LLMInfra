@@ -1,6 +1,11 @@
 """Inference-time components: KV cache management, paging and decoding."""
 
 from .kv_cache_offload import OnDiskKVStore, TieredKVCache
+from .kv_cache_quantization import (
+    QuantizedChunk,
+    QuantizedKVCache,
+    quantized_paged_attention,
+)
 from .paged_attention import (
     PagedAttentionCache,
     PagedKVBlockAllocator,
@@ -13,6 +18,9 @@ __all__ = [
     "OnDiskKVStore",
     "PagedAttentionCache",
     "PagedKVBlockAllocator",
+    "QuantizedChunk",
+    "QuantizedKVCache",
     "TieredKVCache",
     "paged_attention",
+    "quantized_paged_attention",
 ]
