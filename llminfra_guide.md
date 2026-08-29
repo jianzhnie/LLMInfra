@@ -34,6 +34,10 @@
 | LinearAttention | Linear Transformers | [Paper](https://arxiv.org/abs/2006.16236);transformers 无对应实现 |
 | LightningAttention | TransnormerLLM / MiniMax-01 | [Paper: TransNormerLLM](https://arxiv.org/abs/2307.14995)、[Paper: MiniMax-01](https://arxiv.org/abs/2501.08313);transformers 无对应实现 |
 | GatedDeltaNet | Qwen3-Next | [Paper](https://arxiv.org/abs/2412.06464)、[transformers](https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_next/modeling_qwen3_next.py) |
+| Retention (RetNet) | RetNet | [Paper](https://arxiv.org/abs/2307.08621);transformers 无对应实现 |
+| GatedLinearAttention (GLA) | GLA Transformer | [Paper](https://arxiv.org/abs/2312.06635);transformers 无对应实现,[fla 库](https://github.com/fla-org/flash-linear-attention)为事实参考 |
+| RWKVLayer | RWKV-4(RWKV-LM) | [Paper](https://arxiv.org/abs/2305.13048)、[transformers](https://github.com/huggingface/transformers/blob/main/src/transformers/models/rwkv/modeling_rwkv.py) |
+| TTTLayer | TTT-Linear(测试时训练) | [Paper](https://arxiv.org/abs/2407.04620);transformers 无对应实现 |
 | KimiDeltaAttention (KDA) | Kimi Linear | [Paper](https://arxiv.org/abs/2510.26692)、[transformers](https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_next/modeling_qwen3_next.py)(`torch_recurrent_gated_delta_rule`) |
 
 ### Positional(`llminfra/positional/`)
@@ -108,6 +112,13 @@ transformers 无手写 FA 内核,权威参照为论文公式、[官方 CUDA 实�
 | OnDiskKVStore / TieredKVCache | vLLM swap 机制近似 | [Paper](https://arxiv.org/abs/2309.06180) §4.4 |
 | BlockSparseIndexer(inference) | NSA 式块选择 | [Paper](https://arxiv.org/abs/2502.11089) |
 | FakeQuantizer / QuantizationConfig / QATWrapper | PyTorch fake-quant/QAT 标准;`mxfp4` ↔ GPT-OSS;`nvfp4` ↔ Blackwell 系 NVFP4 | [Code: torch.ao.quantization](https://github.com/pytorch/pytorch/blob/main/torch/ao/quantization/fake_quantize.py)、[Paper: STE](https://arxiv.org/abs/1308.3432)、[GPT-OSS(MXFP4)](https://arxiv.org/abs/2508.10925)、OCP Microscaling(MX)规范、原生 `torch.float8_e4m3fn`(OCP FP8) |
+
+### Optimizers(`llminfra/optimizers.py`)
+
+| 模块 | 对应模型 | 参考 |
+| --- | --- | --- |
+| Muon(Newton-Schulz 正交化 + AdamW fallback) | Kimi K2、GLM-4.5 等 | [Paper](https://arxiv.org/abs/2502.16982)、[Code: KellerJordan/Muon](https://github.com/KellerJordan/Muon) |
+| MuonClip(QK-clip) | Kimi K2 | [Paper: Kimi K2](https://arxiv.org/abs/2507.20534) §2 |
 
 ### Models(`llminfra/models/`)
 

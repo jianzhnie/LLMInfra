@@ -11,8 +11,9 @@ The package is organized into subpackages by role:
 - `models`: encoder, decoder, language and multimodal models
 - `spec_decode`: N-Gram, EAGLE, Medusa, MTP and DSpark decoding
 
-`quantization` provides fake-quantization/QAT wrappers and
-`module_registry` the public `build_*` / `list_*` factories.
+`quantization` provides fake-quantization/QAT wrappers, `optimizers` the
+Muon/MuonClip optimizers, and `module_registry` the public `build_*` /
+`list_*` factories.
 
 All public names are re-exported here, so ``from llminfra import X`` works
 regardless of the internal layout.
@@ -27,6 +28,7 @@ from .attention import (
     DynamicSparseAttention,
     FlashMLA,
     GatedDeltaNet,
+    GatedLinearAttention,
     GroupedQueryAttention,
     HierarchicalCompressedAttention,
     HybridAttention,
@@ -38,8 +40,11 @@ from .attention import (
     MultiHeadLatentAttention,
     MultiQueryAttention,
     QueryKeyBlockIndexer,
+    Retention,
     RingAttention,
+    RWKVLayer,
     SlidingWindowAttention,
+    TTTLayer,
     distributed_ring_attention,
     ring_attention,
 )
@@ -106,6 +111,7 @@ from .moe import (
     load_balance_loss,
     router_z_loss,
 )
+from .optimizers import Muon, MuonClip
 from .positional import (
     LONGROPE_PRESETS,
     ALiBiBias,
@@ -195,6 +201,7 @@ __all__ = [
     "FlashAttention",
     "FlashMLA",
     "GatedDeltaNet",
+    "GatedLinearAttention",
     "GeGLUFFN",
     "GenerateOutput",
     "GroupedQueryAttention",
@@ -225,6 +232,8 @@ __all__ = [
     "MultiTokenPredictionHead",
     "MultimodalCausalLM",
     "MultimodalCausalLMOutput",
+    "Muon",
+    "MuonClip",
     "NGramSpeculator",
     "NoPositionEncoding",
     "OnDiskKVStore",
@@ -237,7 +246,9 @@ __all__ = [
     "QuantizationConfig",
     "QueryKeyBlockIndexer",
     "RMSNorm",
+    "RWKVLayer",
     "ReGLUFFN",
+    "Retention",
     "RewardModelHead",
     "RingAttention",
     "RotaryPositionEmbedding",
@@ -247,6 +258,7 @@ __all__ = [
     "SpeculativeDecoder",
     "SwiGLUFFN",
     "T5RelativePositionBias",
+    "TTTLayer",
     "TieredKVCache",
     "TokenClassificationHead",
     "TopKRouter",

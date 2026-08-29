@@ -10,6 +10,7 @@ from .attention.base_attention import BaseAttention
 from .attention.block_sparse_attention import BlockSparseAttention
 from .attention.compressed_sparse_attention import CompressedSparseAttention
 from .attention.gated_delta_net import GatedDeltaNet
+from .attention.gated_linear_attention import GatedLinearAttention
 from .attention.grouped_query_attention import GroupedQueryAttention
 from .attention.hybrid_attention import HybridAttention
 from .attention.kimi_delta_attention import KimiDeltaAttention
@@ -18,6 +19,7 @@ from .attention.linear_attention import LinearAttention
 from .attention.multi_head_attention import MultiHeadAttention
 from .attention.multi_head_latent_attention import MultiHeadLatentAttention
 from .attention.multi_query_attention import MultiQueryAttention
+from .attention.retention import Retention
 from .attention.ring_attention import RingAttention
 from .attention.sliding_window_attention import SlidingWindowAttention
 from .attention.sparse_attention import (
@@ -51,9 +53,13 @@ ATTENTION_REGISTRY: dict[str, type[BaseAttention]] = {
     "linear": LinearAttention,
     "lightning": LightningAttention,
     "gated_delta": GatedDeltaNet,
+    "gla": GatedLinearAttention,
+    "gated_linear": GatedLinearAttention,
     "hybrid": HybridAttention,
     "kda": KimiDeltaAttention,
     "kimi_delta": KimiDeltaAttention,
+    "retention": Retention,
+    "retnet": Retention,
 }
 
 
