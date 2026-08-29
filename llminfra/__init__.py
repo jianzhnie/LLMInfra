@@ -12,9 +12,9 @@ The package is organized into subpackages by role:
 - `spec_decode`: N-Gram, EAGLE, Medusa, MTP and DSpark decoding
 
 `quantization` provides fake-quantization/QAT wrappers, `optimizers` the
-Muon/MuonClip optimizers, `generation` the sampling logits processors and
-beam search, and `module_registry` the public `build_*` / `list_*`
-factories.
+Muon/MuonClip optimizers, `generation` the sampling logits processors and a
+simple ``generate`` loop, and `module_registry` the public `build_*` /
+`list_*` factories.
 
 All public names are re-exported here, so ``from llminfra import X`` works
 regardless of the internal layout.
@@ -57,7 +57,7 @@ from .generation import (
     RepetitionPenaltyLogitsProcessor,
     TopKLogitsProcessor,
     TopPLogitsProcessor,
-    beam_search,
+    generate,
 )
 from .inference import (
     BlockSparseIndexer,
@@ -289,7 +289,6 @@ __all__ = [
     "YaRNParameters",
     "YaRNScaledRotaryEmbedding",
     "apply_rotary_pos_emb",
-    "beam_search",
     "build_attention",
     "build_feed_forward",
     "build_multimodal_position_ids",
@@ -298,6 +297,7 @@ __all__ = [
     "dflash_loss",
     "distributed_ring_attention",
     "flash_attention",
+    "generate",
     "get_activation",
     "get_longrope_preset",
     "list_attentions",

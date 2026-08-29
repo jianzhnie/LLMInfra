@@ -111,3 +111,62 @@ class MultiQueryAttention(BaseAttention):
         if return_attention_weights:
             return output, attention_weights
         return output
+
+    def forward_with_cache(
+        self,
+        hidden_state: torch.Tensor,
+        past_key_value: tuple[torch.Tensor, torch.Tensor] | None = None,
+        attention_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        """Forward pass with a KV cache for incremental decoding.
+
+        Computes queries/keys/values for the ``q_len`` new positions in
+        ``hidden_state`` only, appends the new keys/values to
+        ``past_key_value`` (along the sequence dimension) when given, and
+        attends over the full ``past_len + q_len`` key/value set. The cache
+        keeps the single shared key/value head, so this is where MQA's
+        memory saving over MHA comes from.
+
+        Args:
+            hidden_state (torch.Tensor): New-token input of shape
+                (batch_size, q_len, hidden_size).
+            past_key_value (Optional[Tuple[torch.Tensor, torch.Tensor]]):
+                Cached ``(key, value)`` from previous steps, each of shape
+                (batch_size, 1, past_len, head_dim).
+            attention_mask (Optional[torch.Tensor]): Keep-mask broadcastable
+                against the (batch_size, num_heads, q_len, past_len + q_len)
+                scores; same 1/0 semantics as :meth:`forward`, with the key
+                dimension spanning past and new positions.
+
+        Returns:
+            Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]: The
+                output of shape (batch_size, q_len, hidden_size) and the
+                updated ``(key, value)`` cache including the new positions.
+
+        """
+        if hidden_state.dim() != 3:
+            raise ValueError(f"hidden_state must be 3D, got {hidden_state.dim()}D")
+        query = self.split_head(self.q_proj(hidden_state))
+        key = self.split_head(self.k_proj(hidden_state), num_heads=1)
+        value = self.split_head(self.v_proj(hidden_state), num_heads=1)
+        query, key = self._apply_qk_norm(query, key)
+        if past_key_value is not None:
+            past_key, past_value = past_key_value
+            key = torch.cat([past_key, key], dim=2)
+            value = torch.cat([past_value, value], dim=2)
+        if attention_mask is not None and attention_mask.size(-1) != key.size(2):
+            raise ValueError(
+                f"attention_mask key length {attention_mask.size(-1)} must "
+                f"match the cached key length {key.size(2)}"
+            )
+
+        attention_scores = (
+            torch.matmul(query, key.transpose(-1, -2)) * self.scale_factor
+        )
+        attention_weights = self.compute_attention_weights(
+            attention_scores, attention_mask
+        )
+
+        output: torch.Tensor = torch.matmul(attention_weights, value)
+        output = self.o_proj(self.combine_head(output))
+        return output, (key, value)

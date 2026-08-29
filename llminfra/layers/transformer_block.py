@@ -231,6 +231,70 @@ class TransformerBlock(nn.Module):
             return hidden_state, attention_weights
         return hidden_state
 
+    def forward_with_cache(
+        self,
+        hidden_state: torch.Tensor,
+        past_key_value: tuple[torch.Tensor, torch.Tensor] | None = None,
+        attention_mask: torch.Tensor | None = None,
+        layer_index: int = 0,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        """Run one transformer block with a KV cache for incremental decoding.
+
+        This mirrors :meth:`forward` exactly — the residual, norm-style,
+        parallel and FFN logic is shared — but routes the attention sublayer
+        through its ``forward_with_cache`` method so keys/values are
+        appended to ``past_key_value`` instead of recomputed for the whole
+        sequence. ``layer_index`` is accepted for interface parity with
+        :meth:`forward`; it is only meaningful for ``HybridAttention``,
+        which does not support caching.
+
+        Args:
+            hidden_state: New-token input of shape (batch_size, q_len,
+                hidden_size).
+            past_key_value: Optional cached ``(key, value)`` pair for this
+                block from previous decode steps.
+            attention_mask: Optional keep-mask broadcastable against the
+                (batch_size, num_heads, q_len, past_len + q_len) scores.
+            layer_index: Unused; kept for signature parity with
+                :meth:`forward`.
+
+        Returns:
+            The block output of shape (batch_size, q_len, hidden_size) and
+            the updated ``(key, value)`` cache for this block.
+
+        Raises:
+            ValueError: If the attention module does not implement
+                ``forward_with_cache``.
+
+        """
+        del layer_index  # only HybridAttention consumes it; it cannot cache
+        attention_forward_with_cache = getattr(
+            self.attention, "forward_with_cache", None
+        )
+        if not callable(attention_forward_with_cache):
+            raise ValueError(
+                f"{type(self.attention).__name__} does not support KV-cache "
+                "decoding; forward_with_cache is implemented by "
+                "MultiHeadAttention, GroupedQueryAttention and "
+                "MultiQueryAttention"
+            )
+        if self.norm_style in {"post", "deepnorm"}:
+            attention_input = hidden_state
+        else:
+            if self.norm1 is None:
+                raise RuntimeError("norm1 was not initialized")
+            attention_input = self.norm1(hidden_state)
+        attention_output, present = attention_forward_with_cache(
+            attention_input,
+            past_key_value=past_key_value,
+            attention_mask=attention_mask,
+        )
+        if self.parallel:
+            hidden_state = self._parallel_forward(hidden_state, attention_output)
+        else:
+            hidden_state = self._sequential_forward(hidden_state, attention_output)
+        return hidden_state, present
+
     def _sequential_forward(
         self, hidden_state: torch.Tensor, attention_output: torch.Tensor
     ) -> torch.Tensor:

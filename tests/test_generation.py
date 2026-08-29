@@ -1,4 +1,4 @@
-"""Tests for logits processors, beam search and generate() integration."""
+"""Tests for logits processors and the generate() decode loops."""
 
 import math
 
@@ -12,7 +12,10 @@ from llminfra.generation import (
     RepetitionPenaltyLogitsProcessor,
     TopKLogitsProcessor,
     TopPLogitsProcessor,
-    beam_search,
+)
+from llminfra.generation import (
+    generate as standalone_generate,
+    generate_with_cache,
 )
 
 
@@ -140,12 +143,12 @@ def test_logits_processor_list_applies_in_order():
     assert out[0, 0] == 1.0 and torch.isneginf(out[0, 1])
 
 
-def _toy_beam_logits(sequences: torch.Tensor) -> torch.Tensor:
-    """Toy logits where greedy is globally suboptimal.
+def _toy_logits(sequences: torch.Tensor) -> torch.Tensor:
+    """Toy logits where greedy is suboptimal.
 
     From the prompt (token 0): token 1 with p=0.4, token 2 with p=0.6.
     After token 1: token 3 with p=0.9. After token 2: token 4 with p=0.55.
-    Greedy picks [2, 4] (0.33); the beam-optimal path is [1, 3] (0.36).
+    Greedy picks [2, 4] (0.33); the globally optimal path is [1, 3] (0.36).
     """
     logits = torch.full((sequences.size(0), 6), -20.0)
     for row, token in enumerate(sequences[:, -1].tolist()):
@@ -159,115 +162,6 @@ def _toy_beam_logits(sequences: torch.Tensor) -> torch.Tensor:
             logits[row, 4] = math.log(0.55)
             logits[row, 5] = math.log(0.45)
     return logits
-
-
-def test_beam_search_finds_global_optimum_greedy_misses():
-    prompt = torch.tensor([[0]])
-    greedy = beam_search(
-        _toy_beam_logits,
-        prompt,
-        num_beams=1,
-        max_new_tokens=2,
-        length_penalty_alpha=0.0,
-    )
-    assert greedy.tolist() == [[0, 2, 4]]
-    beamed = beam_search(
-        _toy_beam_logits,
-        prompt,
-        num_beams=2,
-        max_new_tokens=2,
-        length_penalty_alpha=0.0,
-    )
-    assert beamed.tolist() == [[0, 1, 3]]
-
-
-def test_beam_search_length_penalty_prefers_better_normalized_hypothesis():
-    # Path A: [1, eos] with score log(0.51), length 2.
-    # Path B: [2, 3, 3, 3, eos] with score log(0.49), length 5.
-    # alpha=0 ranks A first (higher cumulative log-prob); alpha=1 ranks B
-    # first (better GNMT-normalized score).
-    def logits_fn(sequences: torch.Tensor) -> torch.Tensor:
-        logits = torch.full((sequences.size(0), 6), -20.0)
-        for row, token in enumerate(sequences[:, -1].tolist()):
-            if token == 0:
-                logits[row, 1] = math.log(0.51)
-                logits[row, 2] = math.log(0.49)
-            elif token == 1:
-                logits[row, 4] = 1.0  # eos right away
-            elif token == 2:
-                logits[row, 3] = 1.0
-            elif token == 3:
-                if sequences.size(1) < 5:
-                    logits[row, 3] = 1.0
-                else:
-                    logits[row, 4] = 1.0  # eos at length 5
-        return logits
-
-    prompt = torch.tensor([[0]])
-    short_first = beam_search(
-        logits_fn,
-        prompt,
-        num_beams=2,
-        max_new_tokens=5,
-        length_penalty_alpha=0.0,
-        eos_token_id=4,
-        pad_token_id=5,
-    )
-    assert short_first.tolist() == [[0, 1, 4]]
-    long_first = beam_search(
-        logits_fn,
-        prompt,
-        num_beams=2,
-        max_new_tokens=5,
-        length_penalty_alpha=1.0,
-        eos_token_id=4,
-        pad_token_id=5,
-    )
-    assert long_first.tolist() == [[0, 2, 3, 3, 3, 4]]
-
-
-def test_beam_search_eos_heap_and_padding_per_row():
-    # Batch row 0 emits eos (token 2) immediately; row 1 emits token 3
-    # forever and runs to max_new_tokens.
-    def logits_fn(sequences: torch.Tensor) -> torch.Tensor:
-        logits = torch.full((sequences.size(0), 5), -20.0)
-        for row in range(sequences.size(0)):
-            if sequences[row, 0] == 1:
-                logits[row, 2] = 1.0
-            else:
-                logits[row, 3] = 1.0
-        return logits
-
-    out = beam_search(
-        logits_fn,
-        torch.tensor([[1], [0]]),
-        num_beams=2,
-        max_new_tokens=3,
-        length_penalty_alpha=0.0,
-        eos_token_id=2,
-        pad_token_id=4,
-    )
-    assert out.shape == (2, 4)
-    assert out[0].tolist() == [1, 2, 4, 4]
-    assert out[1].tolist() == [0, 3, 3, 3]
-
-
-def test_beam_search_rejects_invalid_arguments():
-    prompt = torch.tensor([[0]])
-    with pytest.raises(ValueError, match="num_beams"):
-        beam_search(_toy_beam_logits, prompt, num_beams=0, max_new_tokens=2)
-    with pytest.raises(ValueError, match="max_new_tokens"):
-        beam_search(_toy_beam_logits, prompt, num_beams=2, max_new_tokens=0)
-    with pytest.raises(ValueError, match="length_penalty_alpha"):
-        beam_search(
-            _toy_beam_logits,
-            prompt,
-            num_beams=2,
-            max_new_tokens=2,
-            length_penalty_alpha=-1.0,
-        )
-    with pytest.raises(ValueError, match="batch, seq_len"):
-        beam_search(_toy_beam_logits, torch.tensor([0]), num_beams=2, max_new_tokens=2)
 
 
 def _make_generate_model(max_seq_len: int = 32) -> CausalLMModel:
@@ -322,68 +216,6 @@ def test_generate_top_p_sampling_stays_in_kept_set():
     assert flat == {0, 1}
 
 
-def test_generate_beam_search_finds_global_optimum_on_toy_model():
-    model = _make_generate_model()
-
-    def scripted_forward(input_ids, **kwargs):
-        return _toy_beam_logits(input_ids)[:, None, :].expand(
-            input_ids.size(0), input_ids.size(1), 6
-        )
-
-    original_forward = model.forward
-    model.forward = scripted_forward  # type: ignore[assignment]
-    try:
-        greedy = model.generate(torch.tensor([[0]]), max_new_tokens=2)
-        beamed = model.generate(torch.tensor([[0]]), max_new_tokens=2, num_beams=2)
-    finally:
-        model.forward = original_forward  # type: ignore[assignment]
-
-    assert greedy.sequences.tolist() == [[0, 2, 4]]
-    assert beamed.sequences.tolist() == [[0, 1, 3]]
-
-
-def test_generate_beam_search_shape_and_eos_padding():
-    model = _make_generate_model()
-
-    def scripted_forward(input_ids, **kwargs):
-        # Every row emits eos (token 3) with probability ~1 at every step.
-        logits = torch.full((input_ids.size(0), input_ids.size(1), 32), -60.0)
-        logits[:, :, 3] = 0.0
-        return logits
-
-    original_forward = model.forward
-    model.forward = scripted_forward  # type: ignore[assignment]
-    try:
-        prompt = torch.randint(4, 32, (2, 4))
-        output = model.generate(
-            prompt, max_new_tokens=5, num_beams=3, eos_token_id=3, pad_token_id=9
-        )
-    finally:
-        model.forward = original_forward  # type: ignore[assignment]
-
-    # All beams emit eos at the first step, so the best hypothesis per row is
-    # a single eos token right after the prompt.
-    assert output.sequences.shape == (2, 4 + 1)
-    assert torch.equal(output.sequences[:, :4], prompt)
-    assert output.sequences[:, 4].tolist() == [3, 3]
-
-
-def test_generate_beam_search_without_eos_runs_to_max_new_tokens():
-    model = _make_generate_model()
-    prompt = torch.randint(0, 32, (2, 4))
-    output = model.generate(prompt, max_new_tokens=4, num_beams=2)
-    assert output.sequences.shape == (2, 4 + 4)
-    assert torch.equal(output.sequences[:, :4], prompt)
-
-
-def test_generate_beam_search_top_k_one_collapses_to_greedy():
-    model = _make_generate_model()
-    prompt = torch.randint(0, 32, (2, 4))
-    greedy = model.generate(prompt, max_new_tokens=5)
-    beamed = model.generate(prompt, max_new_tokens=5, num_beams=2, top_k=1)
-    assert torch.equal(beamed.sequences, greedy.sequences)
-
-
 def test_generate_rejects_invalid_decoding_arguments():
     model = _make_generate_model()
     prompt = torch.randint(0, 32, (2, 4))
@@ -399,16 +231,168 @@ def test_generate_rejects_invalid_decoding_arguments():
         model.generate(prompt, min_p=1.5)
     with pytest.raises(ValueError, match="repetition_penalty"):
         model.generate(prompt, repetition_penalty=0.0)
-    with pytest.raises(ValueError, match="num_beams"):
-        model.generate(prompt, num_beams=0)
-    # Beam search is mutually exclusive with temperature sampling.
-    with pytest.raises(ValueError, match="temperature"):
-        model.generate(prompt, num_beams=2, temperature=0.7)
-    # Beam search cannot be combined with speculative decoding.
-    with pytest.raises(ValueError, match="draft_model"):
-        model.generate(prompt, num_beams=2, draft_model=model)
     # Sampling filters are not applied by the speculative decoder.
     with pytest.raises(ValueError, match="draft_model"):
         model.generate(prompt, top_k=5, draft_model=model)
     with pytest.raises(ValueError, match="draft_model"):
         model.generate(prompt, repetition_penalty=1.1, draft_model=model)
+
+
+# --- Standalone generate() --------------------------------------------------
+
+
+def test_generate_greedy_matches_expected_path():
+    # Same toy distribution as above: greedy must pick [2, 4].
+    out = standalone_generate(_toy_logits, torch.tensor([[0]]), max_new_tokens=2)
+    assert out.tolist() == [[0, 2, 4]]
+
+
+def test_generate_greedy_is_deterministic_argmax():
+    def logits_fn(sequences: torch.Tensor) -> torch.Tensor:
+        logits = torch.zeros(sequences.size(0), 5)
+        logits[:, sequences.size(1) % 5] = 1.0
+        return logits
+
+    out = standalone_generate(logits_fn, torch.tensor([[3], [3]]), max_new_tokens=4)
+    # Step t picks argmax at index (prompt_len + t) % 5; prompt_len = 1.
+    assert out.tolist() == [[3, 1, 2, 3, 4], [3, 1, 2, 3, 4]]
+
+
+def test_generate_eos_pads_finished_rows_per_row():
+    def logits_fn(sequences: torch.Tensor) -> torch.Tensor:
+        logits = torch.zeros(sequences.size(0), 5)
+        # Row 0 emits eos (token 4) immediately; row 1 keeps emitting token 1.
+        logits[0, 4] = 1.0
+        logits[1, 1] = 1.0
+        return logits
+
+    out = standalone_generate(
+        logits_fn,
+        torch.tensor([[0], [0]]),
+        max_new_tokens=4,
+        eos_token_id=4,
+        pad_token_id=0,
+    )
+    assert out.tolist() == [[0, 4, 0, 0, 0], [0, 1, 1, 1, 1]]
+
+
+def test_generate_top_k_one_collapses_to_greedy():
+    processors = LogitsProcessorList([TopKLogitsProcessor(1)])
+    torch.manual_seed(0)
+    sampled = standalone_generate(
+        _toy_logits,
+        torch.tensor([[0]]),
+        max_new_tokens=2,
+        temperature=1.0,
+        processors=processors,
+    )
+    greedy = standalone_generate(_toy_logits, torch.tensor([[0]]), max_new_tokens=2)
+    assert torch.equal(sampled, greedy)
+
+
+def test_generate_rejects_invalid_arguments():
+    prompt = torch.tensor([[0]])
+    with pytest.raises(ValueError, match="max_new_tokens"):
+        standalone_generate(_toy_logits, prompt, max_new_tokens=0)
+    with pytest.raises(ValueError, match="temperature"):
+        standalone_generate(_toy_logits, prompt, temperature=-0.5)
+    with pytest.raises(ValueError, match="shape"):
+        standalone_generate(_toy_logits, torch.tensor([0]), max_new_tokens=2)
+    with pytest.raises(ValueError, match="at least one token"):
+        standalone_generate(_toy_logits, torch.zeros(1, 0, dtype=torch.long))
+
+
+# --- Standalone generate_with_cache() ---------------------------------------
+
+
+def _cache_emulating_step(logits_fn):
+    """Wrap a full-sequence ``logits_fn`` as a stateful cache step function.
+
+    The "cache" is just the ids seen so far; this is a correct but
+    compute-wasteful reference used to check the cached decode loop against
+    the naive one.
+    """
+
+    def step(tokens: torch.Tensor, past: torch.Tensor | None):
+        seen = tokens if past is None else torch.cat([past, tokens], dim=-1)
+        return logits_fn(seen), seen
+
+    return step
+
+
+def test_generate_with_cache_matches_naive_greedy():
+    prompt = torch.tensor([[0], [0]])
+    naive = standalone_generate(_toy_logits, prompt, max_new_tokens=3)
+    cached = generate_with_cache(
+        _cache_emulating_step(_toy_logits), prompt, max_new_tokens=3
+    )
+    assert torch.equal(naive, cached)
+
+
+def test_generate_with_cache_matches_naive_sampling_with_same_seed():
+    prompt = torch.tensor([[0]])
+    torch.manual_seed(0)
+    naive = standalone_generate(_toy_logits, prompt, max_new_tokens=4, temperature=0.8)
+    torch.manual_seed(0)
+    cached = generate_with_cache(
+        _cache_emulating_step(_toy_logits), prompt, max_new_tokens=4, temperature=0.8
+    )
+    assert torch.equal(naive, cached)
+
+
+def test_generate_with_cache_prefill_then_single_token_steps():
+    shapes: list[tuple[int, int]] = []
+
+    def step(tokens: torch.Tensor, past: torch.Tensor | None):
+        shapes.append(tuple(tokens.shape))
+        seen = tokens if past is None else torch.cat([past, tokens], dim=-1)
+        return _toy_logits(seen), seen
+
+    generate_with_cache(step, torch.tensor([[0, 0, 0]]), max_new_tokens=4)
+    # One prefill with the full prompt, then one (batch, 1) call per step.
+    assert shapes[0] == (1, 3)
+    assert shapes[1:] == [(1, 1)] * 4
+
+
+def test_generate_with_cache_eos_pads_finished_rows():
+    def logits_fn(sequences: torch.Tensor) -> torch.Tensor:
+        logits = torch.zeros(sequences.size(0), 5)
+        logits[0, 4] = 1.0  # row 0 emits eos immediately
+        logits[1, 1] = 1.0  # row 1 keeps emitting token 1
+        return logits
+
+    out = generate_with_cache(
+        _cache_emulating_step(logits_fn),
+        torch.tensor([[0], [0]]),
+        max_new_tokens=4,
+        eos_token_id=4,
+        pad_token_id=0,
+    )
+    assert out.tolist() == [[0, 4, 0, 0, 0], [0, 1, 1, 1, 1]]
+
+
+def test_generate_with_cache_rejects_invalid_arguments():
+    step = _cache_emulating_step(_toy_logits)
+    prompt = torch.tensor([[0]])
+    with pytest.raises(ValueError, match="max_new_tokens"):
+        generate_with_cache(step, prompt, max_new_tokens=0)
+    with pytest.raises(ValueError, match="temperature"):
+        generate_with_cache(step, prompt, temperature=-0.5)
+    with pytest.raises(ValueError, match="shape"):
+        generate_with_cache(step, torch.tensor([0]), max_new_tokens=2)
+
+
+def test_generate_with_cache_matches_causal_lm_cache_path():
+    """The standalone loop must reproduce ``model.generate(use_cache=True)``."""
+    model = _make_generate_model()
+    prompt = torch.randint(0, 32, (2, 3))
+
+    def step(tokens: torch.Tensor, past: object | None):
+        logits, new_past = model._forward_with_cache(
+            tokens, past  # type: ignore[arg-type]
+        )
+        return logits[:, -1], new_past
+
+    standalone = generate_with_cache(step, prompt, max_new_tokens=5)
+    integrated = model.generate(prompt, max_new_tokens=5, use_cache=True)
+    assert torch.equal(standalone, integrated.sequences)

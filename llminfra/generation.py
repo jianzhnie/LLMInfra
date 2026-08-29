@@ -1,16 +1,19 @@
-"""Sampling logits processors and beam search for autoregressive decoding.
+"""Sampling logits processors and simple generate loops for decoding.
 
 The logits processors follow the semantics of Hugging Face
 ``transformers.generation.logits_process``: each processor is a composable
 transform on ``(batch, vocab)`` logits, optionally conditioned on the token
-ids generated so far. :func:`beam_search` is a teaching-level implementation
-of standard beam search with GNMT length normalization.
+ids generated so far. :func:`generate` is the naive greedy/sampling teaching
+loop (full recompute per step); :func:`generate_with_cache` is its KV-cache
+counterpart, driving a stateful step function (prefill once, then one new
+token per step).
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from typing import TypeVar
 
 import torch
 import torch.nn.functional as F
@@ -172,47 +175,44 @@ class LogitsProcessorList(list[LogitsProcessor]):
         return logits
 
 
-def beam_search(
+def generate(
     logits_fn: Callable[[torch.Tensor], torch.Tensor],
     input_ids: torch.Tensor,
-    num_beams: int,
-    max_new_tokens: int,
-    length_penalty_alpha: float = 1.0,
+    max_new_tokens: int = 20,
+    temperature: float = 0.0,
     eos_token_id: int | None = None,
     pad_token_id: int = 0,
     processors: LogitsProcessorList | None = None,
 ) -> torch.Tensor:
-    """Run standard beam search over a step-wise logits function.
+    """Generate tokens greedily or by sampling.
+
+    Every step keeps exactly one continuation per batch row. With the
+    default ``temperature = 0`` each step takes the argmax (greedy decoding);
+    otherwise the next token is drawn from the softmax of the processed
+    logits divided by ``temperature``.
 
     This is a teaching implementation: ``logits_fn`` is re-evaluated on the
-    full sequence at every step (no KV cache) and each batch row is searched
-    independently. Candidate scores are cumulative log-probabilities.
-    Hypotheses that emit ``eos_token_id`` are moved to a per-row heap and
-    stop expanding; a row is finished once its heap holds ``num_beams``
-    hypotheses. At the end, every row picks the best hypothesis among its
-    heap and its still-live beams, scored by cumulative log-probability
-    divided by the GNMT length penalty ``((5 + len) / 6) ** alpha``
-    (Wu et al., 2016, arXiv:1609.08144), where ``len`` counts the generated
-    tokens including a terminating eos. ``length_penalty_alpha = 0``
-    disables normalization (pure cumulative log-probability).
+    full sequence at every step (no KV cache).
 
     Args:
-        logits_fn: Maps ``(batch * num_beams, seq_len)`` token ids to
-            ``(batch * num_beams, vocab)`` next-token logits.
+        logits_fn: Maps ``(batch, seq_len)`` token ids to ``(batch, vocab)``
+            next-token logits.
         input_ids: Prompt token ids of shape ``(batch, prompt_len)``.
-        num_beams: Beam width, i.e. live hypotheses kept per batch row.
         max_new_tokens: Maximum number of tokens generated per row.
-        length_penalty_alpha: Exponent of the GNMT length penalty.
-        eos_token_id: Optional stop token. ``None`` means every hypothesis
-            runs for exactly ``max_new_tokens`` steps.
-        pad_token_id: Token appended to finished rows during the loop and
-            used to right-pad the returned batch to a common length.
+        temperature: Sampling temperature; the default 0 selects greedy
+            argmax decoding.
+        eos_token_id: Optional stop token. A row stops right after emitting
+            it; all remaining positions in that row are filled with
+            ``pad_token_id``.
+        pad_token_id: Token used to fill row positions after
+            ``eos_token_id``.
         processors: Optional logits processors applied to the raw logits
-            before scoring (e.g. top-k filtering of beam candidates).
+            before sampling (e.g. top-k / top-p filtering).
 
     Returns:
         Long tensor of shape ``(batch, prompt_len + num_generated)`` with
-        the best hypothesis per row, right-padded with ``pad_token_id``.
+        ``num_generated <= max_new_tokens``, right-padded with
+        ``pad_token_id``.
 
     Raises:
         ValueError: If the shapes or hyper-parameters are invalid.
@@ -220,141 +220,127 @@ def beam_search(
     """
     if input_ids.dim() != 2:
         raise ValueError("input_ids must have shape (batch, seq_len)")
-    if num_beams < 1:
-        raise ValueError("num_beams must be >= 1")
+    if input_ids.size(1) < 1:
+        raise ValueError("input_ids must contain at least one token")
     if max_new_tokens < 1:
         raise ValueError("max_new_tokens must be >= 1")
-    if length_penalty_alpha < 0.0:
-        raise ValueError("length_penalty_alpha must be >= 0")
+    if temperature < 0.0:
+        raise ValueError("temperature must be >= 0")
 
-    def length_penalty(length: int) -> float:
-        return float(((5.0 + length) / 6.0) ** length_penalty_alpha)
-
-    batch_size, prompt_len = input_ids.shape
-    device = input_ids.device
-    sequences = (
-        input_ids[:, None, :]
-        .expand(batch_size, num_beams, prompt_len)
-        .reshape(batch_size * num_beams, prompt_len)
-        .contiguous()
-    )
-    # Beam 0 starts as the only live hypothesis; the rest enter after the
-    # first expansion through their -inf initial score.
-    beam_scores = torch.full((batch_size, num_beams), float("-inf"), device=device)
-    beam_scores[:, 0] = 0.0
-    beam_lengths = torch.zeros(batch_size, num_beams, dtype=torch.long, device=device)
-    row_done = torch.zeros(batch_size, dtype=torch.bool, device=device)
-    # Per-row heaps of (normalized_score, length, sequence) for hypotheses
-    # that ended with eos.
-    heaps: list[list[tuple[float, int, torch.Tensor]]] = [[] for _ in range(batch_size)]
-
+    sequences = input_ids
+    finished = torch.zeros(sequences.size(0), dtype=torch.bool, device=sequences.device)
     for _ in range(max_new_tokens):
         logits = logits_fn(sequences)
-        vocab_size = logits.size(-1)
         if processors is not None and len(processors) > 0:
             logits = processors(logits, sequences)
-        log_probs = F.log_softmax(logits.float(), dim=-1).view(
-            batch_size, num_beams, vocab_size
+        if temperature <= 0.0:
+            next_token = torch.argmax(logits, dim=-1)
+        else:
+            probabilities = torch.softmax(logits / temperature, dim=-1)
+            next_token = torch.multinomial(probabilities, 1).squeeze(-1)
+        # Finished rows keep emitting pad so every row stays the same length.
+        next_token = torch.where(
+            finished, next_token.new_full((), pad_token_id), next_token
         )
-        candidate_scores = beam_scores[:, :, None] + log_probs
-        cur_len = sequences.size(1)
+        sequences = torch.cat([sequences, next_token[:, None]], dim=-1)
+        if eos_token_id is not None:
+            finished = finished | (next_token == eos_token_id)
+            if bool(finished.all()):
+                break
+    return sequences
 
-        next_scores = torch.zeros_like(beam_scores)
-        next_lengths = torch.zeros_like(beam_lengths)
-        next_tokens: list[torch.Tensor] = []
-        for row in range(batch_size):
-            row_seqs = sequences.view(batch_size, num_beams, cur_len)[row]
-            if row_done[row]:
-                # Frozen row: keep the beams as-is and pad to stay in shape.
-                pad_col = torch.full_like(row_seqs[:, :1], pad_token_id)
-                next_tokens.append(torch.cat([row_seqs, pad_col], dim=-1))
-                next_scores[row] = beam_scores[row]
-                next_lengths[row] = beam_lengths[row]
-                continue
-            flat_scores = candidate_scores[row].reshape(-1)
-            top_scores, top_indices = flat_scores.topk(
-                min(2 * num_beams, flat_scores.numel())
-            )
-            # Split the top 2*num_beams candidates into eos continuations
-            # (heap) and live continuations (next beams).
-            chosen: list[tuple[float, int, int]] = []
-            for score, flat_index in zip(
-                top_scores.tolist(), top_indices.tolist(), strict=True
-            ):
-                beam_index, token = divmod(flat_index, vocab_size)
-                if eos_token_id is not None and token == eos_token_id:
-                    length = int(beam_lengths[row, beam_index]) + 1
-                    finished_seq = torch.cat(
-                        [row_seqs[beam_index], row_seqs.new_tensor([token])]
-                    )
-                    heaps[row].append(
-                        (score / length_penalty(length), length, finished_seq)
-                    )
-                    continue
-                chosen.append((score, beam_index, token))
-                if len(chosen) == num_beams:
-                    break
-            if not chosen:
-                # Every candidate ended in eos: nothing left to expand.
-                row_done[row] = True
-                pad_col = torch.full_like(row_seqs[:, :1], pad_token_id)
-                next_tokens.append(torch.cat([row_seqs, pad_col], dim=-1))
-                next_scores[row] = beam_scores[row]
-                next_lengths[row] = beam_lengths[row]
-                continue
-            # Fewer than num_beams live candidates survived (the rest were
-            # eos): repeat the worst one to keep the beam count constant.
-            while len(chosen) < num_beams:
-                chosen.append(chosen[-1])
-            next_tokens.append(
-                torch.stack(
-                    [
-                        torch.cat([row_seqs[beam_index], row_seqs.new_tensor([token])])
-                        for _, beam_index, token in chosen
-                    ]
-                )
-            )
-            next_scores[row] = torch.tensor(
-                [score for score, _, _ in chosen], device=device
-            )
-            next_lengths[row] = torch.tensor(
-                [int(beam_lengths[row, beam_index]) + 1 for _, beam_index, _ in chosen],
-                device=device,
-            )
-            if len(heaps[row]) >= num_beams:
-                row_done[row] = True
 
-        sequences = torch.cat(next_tokens, dim=0)
-        beam_scores = next_scores
-        beam_lengths = next_lengths
-        if bool(row_done.all()):
-            break
+# Opaque per-call cache state threaded through ``generate_with_cache``; the
+# caller (e.g. a model's ``forward_with_cache``) decides what it holds.
+CacheState = TypeVar("CacheState")
 
-    results: list[torch.Tensor] = []
-    final_len = sequences.size(1)
-    for row in range(batch_size):
-        candidates: list[tuple[float, torch.Tensor]] = [
-            (norm_score, seq) for norm_score, _, seq in heaps[row]
-        ]
-        row_seqs = sequences.view(batch_size, num_beams, final_len)[row]
-        for beam in range(num_beams):
-            candidates.append(
-                (
-                    float(beam_scores[row, beam])
-                    / length_penalty(int(beam_lengths[row, beam])),
-                    row_seqs[beam],
-                )
-            )
-        # Ties prefer finished (heap) hypotheses over still-live beams.
-        results.append(max(candidates, key=lambda candidate: candidate[0])[1])
 
-    out_len = max(seq.size(0) for seq in results)
-    output = torch.full(
-        (batch_size, out_len), pad_token_id, dtype=input_ids.dtype, device=device
-    )
-    for row, seq in enumerate(results):
-        output[row, : seq.size(0)] = seq
-    return output
+def generate_with_cache(
+    step_fn: Callable[
+        [torch.Tensor, CacheState | None], tuple[torch.Tensor, CacheState]
+    ],
+    input_ids: torch.Tensor,
+    max_new_tokens: int = 20,
+    temperature: float = 0.0,
+    eos_token_id: int | None = None,
+    pad_token_id: int = 0,
+    processors: LogitsProcessorList | None = None,
+) -> torch.Tensor:
+    """Generate tokens greedily or by sampling, reusing a KV cache.
+
+    This is the cached counterpart of :func:`generate`: instead of a
+    ``logits_fn`` that re-reads the whole sequence every step, it drives a
+    stateful ``step_fn``. The first call is the prefill pass — it receives
+    the full prompt with ``past=None`` — and every later call receives only
+    the newly generated ``(batch, 1)`` tokens plus the cache state returned
+    by the previous call. Sampling, logits processing and eos/pad handling
+    are identical to :func:`generate`, so a faithful ``step_fn`` produces
+    the same tokens in O(1) sequence-length work per step.
+
+    For :class:`llminfra.models.CausalLMModel`, the step function is simply
+    ``model._forward_with_cache`` with the last-position logits sliced off;
+    ``model.generate(use_cache=True)`` wraps exactly that.
+
+    Args:
+        step_fn: Maps ``(tokens, past)`` to ``(logits, new_past)`` where
+            ``tokens`` is the full prompt on the first call and ``(batch, 1)``
+            afterwards, ``logits`` holds the next-token logits of shape
+            ``(batch, vocab)`` for the last fed position, and ``past`` is an
+            opaque cache state threaded between calls.
+        input_ids: Prompt token ids of shape ``(batch, prompt_len)``.
+        max_new_tokens: Maximum number of tokens generated per row.
+        temperature: Sampling temperature; the default 0 selects greedy
+            argmax decoding.
+        eos_token_id: Optional stop token. A row stops right after emitting
+            it; all remaining positions in that row are filled with
+            ``pad_token_id``.
+        pad_token_id: Token used to fill row positions after
+            ``eos_token_id``.
+        processors: Optional logits processors applied to the raw logits
+            before sampling (e.g. top-k / top-p filtering).
+
+    Returns:
+        Long tensor of shape ``(batch, prompt_len + num_generated)`` with
+        ``num_generated <= max_new_tokens``, right-padded with
+        ``pad_token_id``.
+
+    Raises:
+        ValueError: If the shapes or hyper-parameters are invalid.
+
+    """
+    if input_ids.dim() != 2:
+        raise ValueError("input_ids must have shape (batch, seq_len)")
+    if input_ids.size(1) < 1:
+        raise ValueError("input_ids must contain at least one token")
+    if max_new_tokens < 1:
+        raise ValueError("max_new_tokens must be >= 1")
+    if temperature < 0.0:
+        raise ValueError("temperature must be >= 0")
+
+    sequences = input_ids
+    finished = torch.zeros(sequences.size(0), dtype=torch.bool, device=sequences.device)
+    past: CacheState | None = None
+    tokens = input_ids  # prefill consumes the full prompt
+    for _ in range(max_new_tokens):
+        logits, past = step_fn(tokens, past)
+        if processors is not None and len(processors) > 0:
+            logits = processors(logits, sequences)
+        if temperature <= 0.0:
+            next_token = torch.argmax(logits, dim=-1)
+        else:
+            probabilities = torch.softmax(logits / temperature, dim=-1)
+            next_token = torch.multinomial(probabilities, 1).squeeze(-1)
+        # Finished rows keep emitting pad so every row stays the same length.
+        next_token = torch.where(
+            finished, next_token.new_full((), pad_token_id), next_token
+        )
+        sequences = torch.cat([sequences, next_token[:, None]], dim=-1)
+        if eos_token_id is not None:
+            finished = finished | (next_token == eos_token_id)
+            if bool(finished.all()):
+                break
+        tokens = next_token[:, None]  # decode steps feed only the new token
+    return sequences
 
 
 __all__ = [
@@ -364,5 +350,6 @@ __all__ = [
     "RepetitionPenaltyLogitsProcessor",
     "TopKLogitsProcessor",
     "TopPLogitsProcessor",
-    "beam_search",
+    "generate",
+    "generate_with_cache",
 ]

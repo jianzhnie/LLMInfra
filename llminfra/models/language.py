@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.nn.functional as F
@@ -16,7 +16,6 @@ from ..generation import (
     RepetitionPenaltyLogitsProcessor,
     TopKLogitsProcessor,
     TopPLogitsProcessor,
-    beam_search,
 )
 from ..layers.feed_forward import SwiGLUFFN
 from ..layers.normalization import RMSNorm
@@ -24,6 +23,11 @@ from ..layers.transformer_block import TransformerBlock
 from ..module_registry import build_attention, build_positional_encoding
 from ..moe import DeepSeekMoE
 from ..positional.multimodal_rope import MultiModalRotaryPositionEmbedding
+from ..positional.rotary import (
+    RotaryPositionEmbedding,
+    _cos_sin_with_cache,
+    apply_rotary_pos_emb,
+)
 from ..spec_decode.base import SpeculativeDecoder
 from ..spec_decode.mtp import MultiTokenPredictionHead, mtp_loss
 from .encoder_decoder import cached_causal_mask
@@ -395,6 +399,128 @@ class CausalLMModel(nn.Module):
             return logits, last_weights
         return logits
 
+    def _forward_with_cache(
+        self,
+        input_ids: torch.Tensor,
+        past_key_values: tuple[tuple[torch.Tensor, torch.Tensor], ...] | None = None,
+        attention_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, tuple[tuple[torch.Tensor, torch.Tensor], ...]]:
+        """Run the model over new tokens while reusing cached keys/values.
+
+        The prefill pass (``past_key_values=None``) processes the whole
+        prompt at once; decode passes feed only the newly generated tokens.
+        Both share one code path: query position ``i`` of the new tokens
+        occupies absolute position ``past_len + i`` and attends to key
+        positions ``0..past_len + i`` (a right-aligned causal mask).
+
+        Teaching simplifications: the only supported positional encodings
+        are ``"none"`` and ``"rope"`` (a plain
+        :class:`RotaryPositionEmbedding` applied to the input embedding);
+        RoPE positions are recovered by slicing the cos/sin table at
+        ``past_len``. Any other positional module raises ``ValueError``.
+        Every block's attention module must implement
+        ``forward_with_cache`` (MHA/GQA/MQA); others raise ``ValueError``
+        from :meth:`TransformerBlock.forward_with_cache`.
+
+        Args:
+            input_ids: New token ids of shape ``(batch, q_len)``.
+            past_key_values: Per-block ``(key, value)`` caches returned by
+                previous calls, or ``None`` for the prefill pass.
+            attention_mask: Optional padding keep-mask over all
+                ``past_len + q_len`` key positions (2D ``(batch, total)``,
+                3D or 4D, same 1/0 conventions as :meth:`forward`), combined
+                with the causal mask. Unused by ``generate(use_cache=True)``.
+
+        Returns:
+            Logits for the new positions, shaped ``(batch, q_len,
+            vocab_size)``, and the updated per-block ``(key, value)``
+            caches.
+
+        """
+        if input_ids.dim() != 2:
+            raise ValueError("input_ids must have shape (batch, seq_len)")
+        batch_size, q_len = input_ids.size()
+        past_len = 0
+        if past_key_values is not None:
+            if len(past_key_values) != self.num_layers:
+                raise ValueError(
+                    f"past_key_values must hold {self.num_layers} per-layer "
+                    f"entries, got {len(past_key_values)}"
+                )
+            past_len = past_key_values[0][0].size(2)
+        total_len = past_len + q_len
+        if total_len > self.max_seq_len:
+            raise ValueError(
+                f"cached sequence length {total_len} exceeds max_seq_len "
+                f"{self.max_seq_len}"
+            )
+
+        hidden_state = self.embed_tokens(input_ids)
+        positional = self.positional
+        if positional is not None:
+            if type(positional) is not RotaryPositionEmbedding:
+                raise ValueError(
+                    "KV-cache decoding only supports positional='rope' or "
+                    f"'none', got {type(positional).__name__}; other "
+                    "positional encodings are outside the teaching scope of "
+                    "this path"
+                )
+            cos, sin = _cos_sin_with_cache(
+                positional,
+                total_len,
+                hidden_state.dtype,
+                positional.max_seq_len,
+                positional.dim // 2,
+                positional._build_cos_sin,
+            )
+            # Rotate the new-token embeddings by their absolute positions
+            # past_len..total_len-1 instead of 0..q_len-1.
+            hidden_state = apply_rotary_pos_emb(
+                hidden_state,
+                cos[past_len:total_len],
+                sin[past_len:total_len],
+            )
+
+        # Right-aligned causal mask: query i sees keys 0..past_len+i.
+        query_positions = torch.arange(q_len, device=input_ids.device)[:, None]
+        key_positions = torch.arange(total_len, device=input_ids.device)[None, :]
+        combined_mask = (key_positions <= query_positions + past_len).expand(
+            batch_size, 1, q_len, total_len
+        )
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(device=input_ids.device)
+            if attention_mask.dim() == 2:
+                padding = attention_mask[:, None, None, :]
+            elif attention_mask.dim() == 3:
+                padding = attention_mask.unsqueeze(1)
+            elif attention_mask.dim() == 4:
+                padding = attention_mask
+            else:
+                raise ValueError("attention_mask must be 2D, 3D or 4D")
+            if padding.size(0) != batch_size:
+                raise ValueError("attention_mask batch size must match input_ids")
+            combined_mask = combined_mask & padding.bool()
+
+        presents: list[tuple[torch.Tensor, torch.Tensor]] = []
+        for layer_index, block_module in enumerate(self.blocks):
+            # ModuleList iteration is typed as nn.Module; every entry is a
+            # TransformerBlock by construction.
+            block = cast(TransformerBlock, block_module)
+            layer_past = (
+                past_key_values[layer_index] if past_key_values is not None else None
+            )
+            hidden_state, present = block.forward_with_cache(
+                hidden_state,
+                past_key_value=layer_past,
+                attention_mask=combined_mask,
+                layer_index=layer_index,
+            )
+            presents.append(present)
+
+        hidden_state = self.norm(hidden_state)
+        logits: torch.Tensor = self.lm_head(hidden_state)
+        return logits, tuple(presents)
+
     @torch.no_grad()
     def generate(
         self,
@@ -409,14 +535,22 @@ class CausalLMModel(nn.Module):
         top_p: float = 1.0,
         min_p: float = 0.0,
         repetition_penalty: float = 1.0,
-        num_beams: int = 1,
+        use_cache: bool = False,
     ) -> GenerateOutput:
         """Generate tokens autoregressively from a prompt.
 
-        This is a teaching API: every step recomputes the full forward pass
-        over the whole sequence (these are reference implementations with no
-        KV cache), so generation is quadratic in the total sequence length.
-        It is meant for small experiments, not for serving.
+        This is a teaching API. By default every step recomputes the full
+        forward pass over the whole sequence, so generation is quadratic in
+        the total sequence length. With ``use_cache=True`` the prompt is
+        encoded once and each decode step processes only the new token
+        through the KV-cache path (see :meth:`_forward_with_cache`), reusing
+        cached keys/values instead. The cache path is a teaching
+        simplification: it requires MHA/GQA/MQA attention and ``positional``
+        ``"rope"`` or ``"none"``, does not accept padding masks, and cannot
+        be combined with ``draft_model``. Both paths share
+        the same sampling, logits-processing and early-stop helpers, so they
+        emit identical tokens. This API is meant for small experiments, not
+        for serving.
 
         Args:
             input_ids: Prompt token ids of shape ``(batch, prompt_len)``.
@@ -437,14 +571,14 @@ class CausalLMModel(nn.Module):
                 target, the generated tokens match plain greedy decoding
                 exactly (speculative decoding is lossless). The speculative
                 decoder performs its own sampling, so combining
-                ``draft_model`` with ``top_k``, ``top_p``, ``min_p``,
-                ``repetition_penalty`` or ``num_beams > 1`` is rejected.
+                ``draft_model`` with ``top_k``, ``top_p``, ``min_p`` or
+                ``repetition_penalty`` is rejected.
             num_speculative_tokens: Draft tokens proposed per speculative
                 step. Only used when ``draft_model`` is given.
             top_k: Keep only the ``top_k`` highest-probability tokens before
                 sampling (``0`` disables, see
                 :class:`llminfra.generation.TopKLogitsProcessor`). Also
-                constrains greedy decoding and beam-search candidates.
+                constrains greedy decoding.
             top_p: Nucleus sampling: keep the smallest token set whose
                 cumulative probability exceeds ``top_p`` (``1.0`` disables,
                 see :class:`llminfra.generation.TopPLogitsProcessor`).
@@ -455,11 +589,12 @@ class CausalLMModel(nn.Module):
                 included): positive logits are divided and negative logits
                 multiplied by this factor (``1.0`` disables, see
                 :class:`llminfra.generation.RepetitionPenaltyLogitsProcessor`).
-            num_beams: Beam width. The default ``1`` uses greedy/temperature
-                sampling; values above 1 switch to beam search with GNMT
-                length normalization (see
-                :func:`llminfra.generation.beam_search`), which requires
-                ``temperature == 0`` and no ``draft_model``.
+            use_cache: Decode through the KV-cache path: one prefill pass
+                over the prompt, then one token per step. Mutually exclusive
+                with ``draft_model``; requires
+                ``positional`` to be ``"rope"`` or ``"none"`` and an
+                attention module implementing ``forward_with_cache``
+                (MHA/GQA/MQA).
 
         Returns:
             A :class:`GenerateOutput` whose ``sequences`` have shape
@@ -487,15 +622,8 @@ class CausalLMModel(nn.Module):
             raise ValueError("min_p must be in [0, 1]")
         if repetition_penalty <= 0.0:
             raise ValueError("repetition_penalty must be > 0")
-        if num_beams < 1:
-            raise ValueError("num_beams must be >= 1")
-        if num_beams > 1 and temperature != 0.0:
-            raise ValueError(
-                "beam search (num_beams > 1) is mutually exclusive with "
-                "temperature sampling; use temperature == 0"
-            )
-        if num_beams > 1 and draft_model is not None:
-            raise ValueError("beam search cannot be combined with draft_model")
+        if use_cache and draft_model is not None:
+            raise ValueError("use_cache cannot be combined with draft_model")
         if draft_model is not None and (
             top_k > 0 or top_p < 1.0 or min_p > 0.0 or repetition_penalty != 1.0
         ):
@@ -529,19 +657,6 @@ class CausalLMModel(nn.Module):
         if min_p > 0.0:
             processors.append(MinPLogitsProcessor(min_p))
 
-        if num_beams > 1:
-            return GenerateOutput(
-                sequences=beam_search(
-                    lambda ids: self(ids)[:, -1],
-                    input_ids,
-                    num_beams=num_beams,
-                    max_new_tokens=max_new_tokens,
-                    eos_token_id=eos_token_id,
-                    pad_token_id=pad_token_id,
-                    processors=processors if processors else None,
-                )
-            )
-
         decoder: SpeculativeDecoder | None = None
         if draft_model is not None:
             decoder = SpeculativeDecoder(
@@ -550,6 +665,16 @@ class CausalLMModel(nn.Module):
                 num_speculative_tokens=num_speculative_tokens,
                 temperature=temperature,
                 pad_token_id=pad_token_id,
+            )
+
+        if use_cache:
+            return self._generate_with_cache(
+                input_ids,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                eos_token_id=eos_token_id,
+                pad_token_id=pad_token_id,
+                processors=processors,
             )
 
         sequences = input_ids
@@ -579,6 +704,45 @@ class CausalLMModel(nn.Module):
             num_drafted=num_drafted,
             num_accepted=num_accepted,
         )
+
+    def _generate_with_cache(
+        self,
+        input_ids: torch.Tensor,
+        max_new_tokens: int,
+        temperature: float,
+        eos_token_id: int | None,
+        pad_token_id: int,
+        processors: LogitsProcessorList,
+    ) -> GenerateOutput:
+        """Decode with a KV cache: one prefill pass, then one token per step.
+
+        The sampling, logits-processing and early-stop helpers are the same
+        ones used by the naive loop in :meth:`generate`, and both paths
+        consume the RNG identically (one ``_sample_token`` call per
+        generated token), so they emit identical tokens.
+        """
+        prompt_len = input_ids.size(1)
+        sequences = input_ids
+        logits, past_key_values = self._forward_with_cache(input_ids)
+        while sequences.size(1) - prompt_len < max_new_tokens:
+            step_logits = logits[:, -1]
+            if processors:
+                step_logits = processors(step_logits, sequences)
+            next_token = self._sample_token(step_logits, temperature)
+            sequences = torch.cat([sequences, next_token[:, None]], dim=-1)
+            sequences = sequences[:, : prompt_len + max_new_tokens]
+            finished = sequences.size(1) - prompt_len >= max_new_tokens
+            if eos_token_id is not None:
+                sequences, all_finished = self._mask_after_eos(
+                    sequences, prompt_len, eos_token_id, pad_token_id
+                )
+                finished = finished or bool(all_finished)
+            if finished:
+                break
+            logits, past_key_values = self._forward_with_cache(
+                next_token[:, None], past_key_values
+            )
+        return GenerateOutput(sequences=sequences)
 
     @staticmethod
     def _sample_token(logits: torch.Tensor, temperature: float) -> torch.Tensor:

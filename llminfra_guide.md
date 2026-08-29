@@ -89,7 +89,7 @@
 | TopPLogitsProcessor | Nucleus 采样 | [Paper: Holtzman 2019](https://arxiv.org/abs/1904.09751)、[transformers](https://github.com/huggingface/transformers/blob/main/src/transformers/generation/logits_process.py) |
 | MinPLogitsProcessor | Min-p 采样 | [Paper](https://arxiv.org/abs/2407.01082)、[transformers](https://github.com/huggingface/transformers/blob/main/src/transformers/generation/logits_process.py) |
 | RepetitionPenaltyLogitsProcessor | CTRL 重复惩罚 | [Paper: CTRL](https://arxiv.org/abs/1909.05858)、[transformers](https://github.com/huggingface/transformers/blob/main/src/transformers/generation/logits_process.py) |
-| beam_search(GNMT length penalty) | 经典束搜索 | [Paper: GNMT](https://arxiv.org/abs/1609.08144)、[transformers](https://github.com/huggingface/transformers/blob/main/src/transformers/generation/utils.py) |
+| generate(贪心/采样) | 自回归解码基线 | 教学基线实现;对照 [transformers](https://github.com/huggingface/transformers/blob/main/src/transformers/generation/utils.py) 的 greedy/sample 路径 |
 
 ### Layers(`llminfra/layers/`)
 
@@ -136,7 +136,7 @@ transformers 无手写 FA 内核,权威参照为论文公式、[官方 CUDA 实�
 | 模块 | 对应模型 | 参考 |
 | --- | --- | --- |
 | EncoderOnlyModel / EncoderBlock / pool_hidden_state | BERT 式双向编码器 | [Paper](https://arxiv.org/abs/1810.04805)、[transformers](https://github.com/huggingface/transformers/blob/main/src/transformers/models/bert/modeling_bert.py) |
-| DecoderBlock / CausalLMModel / PrefixLMModel(`generate` 可选 paged cache / speculative decoding) | GPT 式解码器 | [Paper: GPT-2(Radford 2019, 无 arXiv)](https://cdn.openai.com/better-language-models/language_models_are_unsupervised_multitask_learners.pdf)、[transformers](https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt2/modeling_gpt2.py) |
+| DecoderBlock / CausalLMModel / PrefixLMModel(`generate` 支持 naive 全量重算、`use_cache` KV cache 增量解码、speculative decoding) | GPT 式解码器 | [Paper: GPT-2(Radford 2019, 无 arXiv)](https://cdn.openai.com/better-language-models/language_models_are_unsupervised_multitask_learners.pdf)、[transformers](https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt2/modeling_gpt2.py) |
 | EncoderDecoderModel / CrossAttention | T5 / BART 式编码器-解码器 | [Paper: T5](https://arxiv.org/abs/1910.10683)、[BART](https://arxiv.org/abs/1910.13461)、[transformers: t5](https://github.com/huggingface/transformers/blob/main/src/transformers/models/t5/modeling_t5.py)、[bart](https://github.com/huggingface/transformers/blob/main/src/transformers/models/bart/modeling_bart.py) |
 | MultimodalCausalLM / VisionEncoderAdapter / CrossAttentionFuser / build_multimodal_position_ids | LLaVA 式多模态(+ MRoPE 位置 id) | [Paper: LLaVA](https://arxiv.org/abs/2304.08485)、[transformers](https://github.com/huggingface/transformers/blob/main/src/transformers/models/llava/modeling_llava.py) |
 | RewardModelHead / SequenceClassificationHead / TokenClassificationHead / EmbeddingHead | RLHF 奖励模型 / 分类与嵌入头 | [Paper: InstructGPT](https://arxiv.org/abs/2203.02155) |
