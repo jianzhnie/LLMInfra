@@ -148,9 +148,12 @@ class FakeQuantizer(nn.Module):
         E8M0 scale) from NVFP4 (FP8 E4M3 scale).
         """
         levels = torch.tensor(_E2M1_LEVELS, dtype=tensor.dtype, device=tensor.device)
-        last_dim = tensor.size(-1)
+        # A 0-dim tensor has no last axis to block over; treat it as a
+        # one-element row and restore the original shape at the end.
+        work = tensor.reshape(1) if tensor.dim() == 0 else tensor
+        last_dim = work.size(-1)
         pad = (-last_dim) % block_size
-        padded = torch.nn.functional.pad(tensor, (0, pad)) if pad else tensor
+        padded = torch.nn.functional.pad(work, (0, pad)) if pad else work
         blocks = padded.reshape(*padded.shape[:-1], -1, block_size)
 
         max_abs = blocks.abs().amax(dim=-1, keepdim=True)
@@ -161,7 +164,8 @@ class FakeQuantizer(nn.Module):
         quantized = levels[nearest] * blocks.sign() * scale
 
         quantized = quantized.reshape(*padded.shape)
-        return quantized[..., :last_dim] if pad else quantized
+        sliced = quantized[..., :last_dim] if pad else quantized
+        return sliced.reshape(tensor.shape)
 
     @staticmethod
     def _fake_mxfp4(tensor: torch.Tensor) -> torch.Tensor:
@@ -169,8 +173,9 @@ class FakeQuantizer(nn.Module):
 
         Elements use the E2M1 format and share one power-of-two E8M0 scale
         per 32-element block along the last axis. The scale is chosen as
-        ``2 ** floor(log2(max_abs / 6))`` so the block maximum maps inside
-        the representable range without saturation.
+        ``2 ** floor(log2(max_abs / 6))``, so the normalized block maximum
+        lands in [6, 12): it saturates at the largest E2M1 magnitude 6
+        unless ``max_abs / 6`` is an exact power of two.
         """
 
         def power_of_two_scale(max_abs: torch.Tensor) -> torch.Tensor:

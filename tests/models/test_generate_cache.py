@@ -146,6 +146,69 @@ def test_cache_rejects_draft_model():
         model.generate(prompt, max_new_tokens=2, use_cache=True, draft_model=model)
 
 
+def test_chunked_prefill_matches_full_forward():
+    """q_len > 1 decode chunks exercise the right-aligned causal mask and the
+    RoPE offset slice ``cos[past_len:total_len]``; the concatenated logits
+    must match a single full forward."""
+    model = _make_model("gqa")
+    ids = torch.randint(0, 32, (2, 11), generator=torch.Generator().manual_seed(3))
+    logits_full = model(ids)
+    past = None
+    chunks = []
+    for chunk in (ids[:, :4], ids[:, 4:7], ids[:, 7:]):
+        logits, past = model._forward_with_cache(chunk, past)
+        chunks.append(logits)
+    assert torch.allclose(logits_full, torch.cat(chunks, dim=1), atol=1e-5)
+
+
+def test_cache_attention_mask_matches_naive_forward():
+    """A 2D padding keep-mask over all ``past_len + q_len`` key positions must
+    reproduce the naive forward's logits at every non-padded position."""
+    model = _make_model("gqa")
+    ids = torch.randint(0, 32, (2, 8), generator=torch.Generator().manual_seed(3))
+    mask = torch.tensor([[1, 1, 1, 1, 0, 0, 0, 0], [1, 1, 1, 1, 1, 1, 1, 1]])
+    logits_full = model(ids, attention_mask=mask)
+    past = None
+    steps = []
+    for position in range(ids.size(1)):
+        logits, past = model._forward_with_cache(
+            ids[:, position : position + 1],
+            past,
+            attention_mask=mask[:, : position + 1],
+        )
+        steps.append(logits)
+    logits_incremental = torch.cat(steps, dim=1)
+    # The naive forward zeroes logits at padded query positions; mask those
+    # slots out of the comparison on both sides.
+    keep = mask.bool().unsqueeze(-1)
+    assert torch.allclose(logits_full * keep, logits_incremental * keep, atol=1e-5)
+
+
+def test_generate_up_to_last_forward_capacity():
+    """The largest sequence any forward pass ingests is prompt + max_new - 1:
+    the final generated token is never fed back. A prompt that already fills
+    max_seq_len must still be able to emit one token (and no more)."""
+    torch.manual_seed(0)
+    model = CausalLMModel(
+        vocab_size=32,
+        hidden_size=16,
+        num_layers=2,
+        num_heads=4,
+        intermediate_size=32,
+        max_seq_len=8,
+        attention_name="gqa",
+    ).eval()
+    prompt = torch.randint(0, 32, (1, 8), generator=torch.Generator().manual_seed(7))
+    naive = model.generate(prompt, max_new_tokens=1)
+    cached = model.generate(prompt, max_new_tokens=1, use_cache=True)
+    assert naive.sequences.shape == (1, 9)
+    assert torch.equal(naive.sequences, cached.sequences)
+    with pytest.raises(ValueError, match="max_seq_len"):
+        model.generate(prompt, max_new_tokens=2)
+    with pytest.raises(ValueError, match="max_seq_len"):
+        model.generate(prompt, max_new_tokens=2, use_cache=True)
+
+
 def test_cache_eos_and_pad_match_naive():
     model = _make_model("gqa")
     prompt = torch.randint(0, 32, (2, 4), generator=torch.Generator().manual_seed(7))

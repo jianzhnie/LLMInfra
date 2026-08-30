@@ -276,3 +276,12 @@ def test_state_dict_round_trip():
     new_matrix.grad = torch.randn_like(new_matrix)
     reloaded.step()
     assert torch.isfinite(new_matrix).all()
+
+
+def test_register_qk_params_rejects_non_positive_num_heads():
+    q_param, k_param = _make_qk_pair(num_heads=2, head_dim=3, in_features=5, seed=10)
+    optimizer = MuonClip([q_param, k_param], lr=0.01)
+    for num_heads in (0, -2):
+        with pytest.raises(ValueError, match="num_heads"):
+            optimizer.register_qk_params("attn0", q_param, k_param, num_heads)
+    assert optimizer.registered_qk_names == ()

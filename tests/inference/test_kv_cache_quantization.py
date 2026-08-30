@@ -137,6 +137,48 @@ def test_single_token_and_constant_rows() -> None:
     torch.testing.assert_close(got_value, value, atol=1e-4, rtol=1e-4)
 
 
+def test_float16_constant_rows_round_trip() -> None:
+    """Constant rows must stay finite in float16.
+
+    Regression test: computing ``lo / scale`` in float16 overflowed to inf
+    for any constant group (the eps-clamped scale is subnormal in fp16),
+    turning the dequantized rows into NaN.
+    """
+    for bits in (8, 4):
+        cache = QuantizedKVCache(
+            num_heads=2,
+            head_dim=4,
+            bits=bits,
+            residual_length=0,
+            dtype=torch.float16,
+        )
+        key = torch.full((3, 2, 4), 3.0, dtype=torch.float16)
+        value = torch.full((3, 2, 4), -2.0, dtype=torch.float16)
+        cache.append(0, key, value)
+        got_key, got_value = cache.get(0)
+        assert torch.isfinite(got_key).all()
+        assert torch.isfinite(got_value).all()
+        torch.testing.assert_close(got_key, key)
+        torch.testing.assert_close(got_value, value)
+
+
+def test_extreme_magnitude_rows_stay_finite() -> None:
+    """Constants near the fp32 ceiling and +-max spans must not overflow."""
+    cache = QuantizedKVCache(num_heads=1, head_dim=2, bits=8, residual_length=0)
+    key = torch.full((1, 1, 2), 1e38)  # lo / (eps scale) overflows fp32
+    cache.append(0, key, key.clone())
+    got_key, _ = cache.get(0)
+    assert torch.isfinite(got_key).all()
+    torch.testing.assert_close(got_key, key, rtol=1e-6, atol=0.0)
+
+    cache = QuantizedKVCache(num_heads=1, head_dim=2, bits=8, residual_length=0)
+    key = torch.tensor([[[-3e38, 3e38]]])  # hi - lo overflows fp32
+    cache.append(0, key, key.clone())
+    got_key, _ = cache.get(0)
+    assert torch.isfinite(got_key).all()
+    torch.testing.assert_close(got_key, key, rtol=1e-2, atol=0.0)
+
+
 def test_empty_sequence_and_empty_attention() -> None:
     cache = QuantizedKVCache(num_heads=2, head_dim=4)
     cache.append(0, torch.randn(0, 2, 4), torch.randn(0, 2, 4))

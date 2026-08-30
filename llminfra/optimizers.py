@@ -340,12 +340,14 @@ class MuonClip(Muon):
             num_heads: Number of attention heads.
 
         Raises:
-            ValueError: If the weight shapes are inconsistent with
-                ``num_heads``.
+            ValueError: If ``num_heads`` is not positive or the weight shapes
+                are inconsistent with ``num_heads``.
 
         """
         if q_param.ndim != 2 or k_param.ndim != 2:
             raise ValueError("q_param and k_param must be 2D weight matrices")
+        if num_heads <= 0:
+            raise ValueError(f"num_heads must be positive, got {num_heads}")
         if q_param.size(0) != k_param.size(0):
             raise ValueError(
                 "This teaching implementation requires num_kv_heads == num_heads"

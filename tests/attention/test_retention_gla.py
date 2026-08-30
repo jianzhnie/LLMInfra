@@ -368,6 +368,36 @@ def test_gla_gate_zero_resets_state_every_step():
     )
 
 
+def test_gla_recurrent_stays_finite_where_chunked_overflows():
+    """Pin the documented stability contract of the chunked factored form.
+
+    With a saturated gate (~2e-9), ``exp(-log_cum)`` grows by ~5e8 per step
+    and overflows float32 within one chunk, so the chunked path produces
+    non-finite values. The recurrent path — the documented numerically
+    stable reference — must stay finite and approach the current-token-only
+    limit. If the chunked path is ever stabilized, update this test and the
+    class docstring together.
+    """
+    module = GatedLinearAttention(HIDDEN, HEADS, feature_dim=16, chunk_size=8).eval()
+    _force_gate(module, -20.0)  # sigmoid(-20) ~ 2e-9
+    x = make_hidden_state(1, 32, HIDDEN)
+
+    chunked = module(x)
+    recurrent = module.recurrent_forward(x)
+    assert not torch.isfinite(chunked).all()  # documented overflow
+    assert torch.isfinite(recurrent).all()
+
+    # The state is reset almost every step, so the recurrent output is close
+    # to the current-token-only limit ``o_t = (q_t . k_t) v_t``.
+    query = module._split(module.q_proj(x)) * module.scale
+    key = module._split(module.k_proj(x))
+    value = module.split_head(module.v_proj(x))
+    limit = module.o_proj(
+        module.combine_head((query * key).sum(dim=-1, keepdim=True) * value)
+    )
+    torch.testing.assert_close(recurrent, limit, rtol=1e-3, atol=1e-5)
+
+
 def test_gla_causal_does_not_see_future(gla):
     """Perturbing the last token must not change earlier outputs."""
     gla = gla.eval()

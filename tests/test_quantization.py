@@ -166,3 +166,13 @@ def test_nvfp4_uses_16_element_blocks():
     # 0.4 / 0.0703125 ~= 5.69 -> E2M1 level 6 -> 6 * 0.0703125 = 0.421875
     quantized = FakeQuantizer(QuantizationConfig(mode="nvfp4"))(values)
     assert quantized[16].item() == 0.421875
+
+
+@pytest.mark.parametrize("mode", ["mxfp4", "nvfp4"])
+def test_fp4_modes_accept_scalar_tensors(mode: str):
+    """A 0-dim tensor has no last axis to block over; treat it as one element."""
+    quantized = FakeQuantizer(QuantizationConfig(mode=mode))(torch.tensor(1.5))
+    assert quantized.shape == ()
+    # 1.5 is exactly representable in E2M1 and 1.5 / 6 = 0.25 is an exact
+    # power of two, so both scale choices reconstruct it losslessly.
+    assert quantized.item() == 1.5

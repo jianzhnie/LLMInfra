@@ -39,15 +39,16 @@ class QuantizedChunk:
     Attributes:
         key_q: Quantized key codes in an int8 container, shape
             ``(tokens, num_heads, head_dim)``.
-        key_scale: Per-channel key scales, shape ``(1, num_heads, head_dim)``:
-            one scale per (head, channel), shared by all tokens of this
-            chunk.
-        key_zero: Per-channel key zero-points, same shape as ``key_scale``.
+        key_scale: Per-channel key scales in float32, shape
+            ``(1, num_heads, head_dim)``: one scale per (head, channel),
+            shared by all tokens of this chunk.
+        key_zero: Per-channel key zero-points in float32, same shape as
+            ``key_scale``.
         value_q: Quantized value codes in an int8 container, shape
             ``(tokens, num_heads, head_dim)``.
-        value_scale: Per-token value scales, shape ``(tokens, num_heads, 1)``:
-            one scale per (token, head).
-        value_zero: Per-token value zero-points, same shape as
+        value_scale: Per-token value scales in float32, shape
+            ``(tokens, num_heads, 1)``: one scale per (token, head).
+        value_zero: Per-token value zero-points in float32, same shape as
             ``value_scale``.
 
     """
@@ -91,11 +92,28 @@ def _quantize_affine(
     # ``Any`` in typeshed (negative exponents yield floats).
     qmin: int = -(2 ** (bits - 1))
     qmax: int = 2 ** (bits - 1) - 1
-    lo = tensor.amin(dim=reduce_dims, keepdim=True)
-    hi = tensor.amax(dim=reduce_dims, keepdim=True)
-    scale = ((hi - lo) / (qmax - qmin)).clamp_min(eps)
+    # Statistics and codes are computed in float32 even when the cache
+    # stores a lower-precision dtype: in float16 an eps-clamped scale is
+    # subnormal and ``lo / scale`` overflows, turning constant groups into
+    # NaN. This also matches the fp32 scales/zero-points that
+    # ``storage_nbytes`` documents.
+    lo = tensor.amin(dim=reduce_dims, keepdim=True).float()
+    hi = tensor.amax(dim=reduce_dims, keepdim=True).float()
+    scale = (hi - lo) / (qmax - qmin)
+    # A near-constant group clamps the scale to eps, where ``lo / scale``
+    # overflows for large |lo| (e.g. a constant 1e38 in fp32). Anchoring
+    # such a group on the extreme code keeps the zero-point finite and the
+    # constant exactly representable.
+    degenerate = scale < eps
+    scale = torch.where(degenerate, lo.abs() / qmax, scale)
+    # Finite endpoints can still overflow the span itself (e.g. +-3e38 in
+    # fp32); dividing before subtracting keeps the scale finite.
+    scale = torch.where(
+        torch.isinf(scale), hi / (qmax - qmin) - lo / (qmax - qmin), scale
+    )
+    scale = scale.clamp_min(eps)
     zero = qmin - lo / scale
-    codes = (tensor / scale + zero).round().clamp(qmin, qmax).to(torch.int8)
+    codes = (tensor.float() / scale + zero).round().clamp(qmin, qmax).to(torch.int8)
     return codes, scale, zero
 
 

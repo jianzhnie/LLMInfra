@@ -41,19 +41,27 @@ class GatedLinearAttention(BaseAttention):
             integer uses the paper's low-rank variant
             ``hidden_size -> num_heads * gate_rank -> num_heads * feature_dim``.
         chunk_size: Tokens per chunk in the parallel forward pass. It is a
-            performance knob and does not change the result.
+            performance knob and does not change the result within the
+            numerical envelope described below.
         dropout: Dropout applied to the output when training.
         bias: Whether linear projections use biases.
 
     Teaching simplifications: queries are scaled by ``1 / sqrt(feature_dim)``
     to keep magnitudes comparable to softmax attention; the chunked path
     factors the cumulative log-gate into the queries and keys
-    (``q ⊙ exp(log_cum)``, ``k ⊙ exp(-log_cum)``), which can overflow in
-    float32 for long chunks with strongly saturated gates — the recurrent
-    path is the numerically stable reference. Masked (padding) positions
-    neither write to nor decay the state: their gate is forced to 1 and
-    their key/value are zeroed, matching the padding semantics of the other
-    recurrent modules in this package.
+    (``q ⊙ exp(log_cum)``, ``k ⊙ exp(-log_cum)``). The ``exp(-log_cum)``
+    factor grows by ``1 / g_t`` per step, so it overflows once a chunk's
+    cumulative ``-log g`` exceeds the dtype's exponential range (~88 in
+    float32, ~11 in float16/bfloat16). Saturation is not required: for
+    roughly zero-mean gate logits the average ``-log g`` per step is at
+    least ``log 2``, so even benign gates overflow float32 when a chunk
+    exceeds ~128 tokens, and half precision overflows well within the
+    default chunk size. The remedies are a smaller ``chunk_size``, float32
+    activations, or the recurrent path, which is the numerically stable
+    reference. Masked (padding) positions neither write to nor decay the
+    state: their gate is forced to 1 and their key/value are zeroed,
+    matching the padding semantics of the other recurrent modules in this
+    package.
 
     """
 

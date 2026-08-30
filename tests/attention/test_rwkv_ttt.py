@@ -12,7 +12,7 @@ import torch
 from helpers import make_hidden_state
 from torch import nn
 
-from llminfra.attention.rwkv import RWKVLayer, RWKVTimeMix
+from llminfra.attention.rwkv import RWKVChannelMix, RWKVLayer, RWKVTimeMix
 from llminfra.attention.ttt import TTTLayer
 
 HIDDEN = 32
@@ -162,6 +162,49 @@ def test_rwkv_empty_sequence():
     layer = RWKVLayer(HIDDEN).eval()
     out = layer(make_hidden_state(BATCH, 0, HIDDEN))
     assert out.shape == (BATCH, 0, HIDDEN)
+
+
+def test_rwkv_submodules_empty_sequence():
+    """Time-mix/channel-mix must not crash on empty inputs when used directly."""
+    x = make_hidden_state(BATCH, 0, HIDDEN)
+    time_mix = RWKVTimeMix(HIDDEN).eval()
+    channel_mix = RWKVChannelMix(HIDDEN).eval()
+    assert time_mix(x).shape == (BATCH, 0, HIDDEN)
+    assert time_mix(x, scan="parallel").shape == (BATCH, 0, HIDDEN)
+    assert channel_mix(x).shape == (BATCH, 0, HIDDEN)
+
+
+@pytest.mark.parametrize("scan", ["recurrent", "parallel"])
+def test_rwkv_half_precision_is_finite(scan):
+    """The scan must run in half precision: the state floor and the decay
+    rate must stay inside the dtype range instead of overflowing to NaN."""
+    layer = RWKVLayer(HIDDEN).half().eval()
+    x = make_hidden_state(BATCH, SEQ, HIDDEN).half()
+    assert torch.isfinite(layer(x, scan=scan)).all()
+    # Padded prefix and fully masked rows exercise the state-floor path.
+    mask = torch.ones(BATCH, 1, 1, SEQ, dtype=torch.bool)
+    mask[0, 0, 0, :2] = False
+    assert torch.isfinite(layer(x, attention_mask=mask, scan=scan)).all()
+    mask = torch.zeros(BATCH, 1, 1, SEQ, dtype=torch.bool)
+    assert torch.isfinite(layer(x, attention_mask=mask, scan=scan)).all()
+
+
+@pytest.mark.parametrize(
+    "dtype,time_decay", [(torch.float32, 90.0), (torch.float16, 12.0)]
+)
+def test_rwkv_parallel_matches_recurrent_with_extreme_decay(dtype, time_decay):
+    """A learned decay whose exp() overflows the dtype must saturate instead
+    of producing NaN, and both scans must agree on the saturated result."""
+    time_mix = RWKVTimeMix(HIDDEN).to(dtype).eval()
+    with torch.no_grad():
+        time_mix.time_decay.copy_(torch.full((HIDDEN,), time_decay, dtype=dtype))
+    key = torch.randn(BATCH, SEQ, HIDDEN, dtype=dtype)
+    value = torch.randn(BATCH, SEQ, HIDDEN, dtype=dtype)
+    recurrent = time_mix._wkv_recurrent(key, value)
+    parallel = time_mix._wkv_parallel(key, value)
+    assert torch.isfinite(recurrent).all()
+    assert torch.isfinite(parallel).all()
+    torch.testing.assert_close(recurrent, parallel, rtol=1e-2, atol=1e-3)
 
 
 # ---------------------------------------------------------------------------

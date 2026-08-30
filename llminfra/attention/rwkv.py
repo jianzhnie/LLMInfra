@@ -111,6 +111,9 @@ class RWKVTimeMix(nn.Module):
                 quadratic ``"parallel"`` form.
 
         """
+        if hidden_state.size(1) == 0:
+            # F.pad's negative trim cannot consume an empty sequence.
+            return hidden_state
         shifted = F.pad(hidden_state, (0, 0, 1, -1))
         mixed_key = hidden_state * self.time_mix_key + shifted * (1 - self.time_mix_key)
         mixed_value = hidden_state * self.time_mix_value + shifted * (
@@ -150,7 +153,10 @@ class RWKVTimeMix(nn.Module):
         time_decay = -torch.exp(self.time_decay)
         num_state = key.new_zeros(batch_size, channels)
         den_state = key.new_zeros(batch_size, channels)
-        max_state = key.new_full((batch_size, channels), -1e38)
+        # The running max starts at the dtype floor so the first exp() is 0;
+        # a hard-coded -1e38 overflows float16 at tensor creation.
+        floor = torch.finfo(key.dtype).min
+        max_state = key.new_full((batch_size, channels), floor)
         outputs: list[torch.Tensor] = []
         for step in range(seq_len):
             key_t = key[:, step]
@@ -175,7 +181,13 @@ class RWKVTimeMix(nn.Module):
             )
 
             # Decay the state and absorb the current token for the next step.
-            max_for_state = torch.maximum(max_state + time_decay, key_t)
+            # Clamp the running max to the dtype floor: while every prefix
+            # token is padded, ``max_state + time_decay`` can underflow to
+            # -inf, and the exp() rescaling would turn -inf - (-inf) into
+            # NaN and poison the state permanently.
+            max_for_state = torch.clamp(
+                torch.maximum(max_state + time_decay, key_t), min=floor
+            )
             e1 = torch.exp(max_state + time_decay - max_for_state)
             e2 = torch.exp(key_t - max_for_state)
             num_state = e1 * num_state + e2 * value_t
@@ -196,7 +208,13 @@ class RWKVTimeMix(nn.Module):
         _, seq_len, _ = key.shape
         if seq_len == 0:
             return value
-        decay = torch.exp(self.time_decay)  # per-channel rate, positive
+        # Clamp the rate to the dtype range: an exp() overflow would make
+        # ``distance * decay`` evaluate 0 * inf = NaN at distance 0 (the
+        # immediately previous token). The clamped rate still saturates the
+        # logits to -inf, which is the correct total-decay limit.
+        decay = torch.exp(self.time_decay).clamp(
+            max=torch.finfo(self.time_decay.dtype).max
+        )
         position = torch.arange(seq_len, device=key.device)
         row = position[:, None]  # query index t
         col = position[None, :]  # key index i
@@ -286,6 +304,9 @@ class RWKVChannelMix(nn.Module):
 
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
         """Run channel-mixing over ``hidden_state``, ``(batch, seq, hidden)``."""
+        if hidden_state.size(1) == 0:
+            # F.pad's negative trim cannot consume an empty sequence.
+            return hidden_state
         shifted = F.pad(hidden_state, (0, 0, 1, -1))
         mixed_key = hidden_state * self.time_mix_key + shifted * (1 - self.time_mix_key)
         mixed_receptance = hidden_state * self.time_mix_receptance + shifted * (

@@ -639,7 +639,7 @@ class CausalLMModel(nn.Module):
             prompt_len
             + max_new_tokens
             - 1
-            + (num_speculative_tokens if draft_model is not None else 1)
+            + (num_speculative_tokens if draft_model is not None else 0)
         )
         if worst_case_len > self.max_seq_len:
             raise ValueError(
