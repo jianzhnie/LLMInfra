@@ -3,27 +3,45 @@
 **English** | [简体中文](README.zh-CN.md)
 
 LLMInfra is an educational PyTorch toolkit implementing modern Transformer,
-attention, MoE, positional encoding, inference, and speculative decoding
-components.
+attention, MoE, positional encoding, inference, generation, and speculative
+decoding components.
 
 ## Features
 
 - Attention: MHA, MQA, GQA, MLA, sliding-window, block-sparse, compressed
-  sparse, linear, Lightning, Gated DeltaNet, ALiBi, hybrid, and ring attention.
+  sparse, dynamic sparse, MiniMax sparse, hierarchical compressed, FlashMLA,
+  ALiBi, hybrid, and ring attention — plus logit soft-capping (Gemma 2),
+  attention sinks (GPT-OSS), and sigmoid output gating (Qwen3-Next) as
+  opt-in options.
+- Linear-time sequence layers: Linear Attention, Lightning Attention,
+  Gated DeltaNet, Kimi Delta Attention (KDA), RetNet retention, GLA, RWKV,
+  and TTT-Linear.
 - FlashAttention: pure-PyTorch FA1-FA4 tiled forward and backward references.
 - Positional encodings: learned and sinusoidal absolute positions, RoPE, YaRN,
-  Dynamic NTK, LongRoPE, ALiBi, T5 relative bias, 2D positions, and MRoPE.
-- Transformer layers: RMSNorm, LayerNorm, SwiGLU and gated FFNs, configurable
-  Transformer blocks, Mamba2-style state-space layers, and hybrid stacks.
+  Dynamic NTK, LongRoPE, partial RoPE, ALiBi (BLOOM slope schedule), T5
+  relative bias, 2D positions, and MRoPE.
+- Transformer layers: RMSNorm, LayerNorm, DeepNorm, LayerScale, SwiGLU and
+  gated FFNs (incl. GPT-OSS clamped SwiGLU), configurable Transformer blocks,
+  Mamba2-style state-space layers, manifold-constrained hyper-connections
+  (mHC), and hybrid stacks.
 - Models: decoder-only, prefix-LM, encoder-only, encoder-decoder, multimodal,
-  classification, reward, token, and embedding heads.
+  classification, reward, token, and embedding heads. `CausalLMModel.generate`
+  supports a naive full-recompute loop, a KV-cache incremental path
+  (`use_cache=True`), and speculative decoding.
+- Generation: top-k / top-p / min-p / repetition-penalty logits processors,
+  plus standalone `generate` / `generate_with_cache` decode loops that can
+  drive any model exposing the matching callables.
 - Mixture of Experts: top-k and expert-choice routing, shared experts, latent
   MoE, expert parallelism, load-balancing loss, and router z-loss.
-- Inference infrastructure: paged KV caches, disk and tiered KV offload, paged
+- Inference infrastructure: paged KV caches, quantized KV caches (KIVI-style
+  per-channel K / per-token V, INT8/INT4), disk and tiered KV offload, paged
   attention, and block-sparse indexing.
 - Speculative decoding: standard draft verification, N-Gram, EAGLE 1-3,
   Medusa, MTP, DFlash block-diffusion drafting, and DSpark dynamic scheduling.
-- Quantization: portable fake INT4, INT8, FP8 quantization and QAT wrappers.
+- Quantization: portable fake INT4, INT8, FP8 (E4M3), MXFP4 and NVFP4
+  quantization with QAT wrappers.
+- Optimizers: Muon (Newton-Schulz orthogonalization with AdamW fallback) and
+  MuonClip (Kimi K2 style QK-clip).
 
 The implementations prioritize clarity, explicit tensor shapes, numerical
 correctness, and testability. They are reference and teaching implementations,
@@ -93,6 +111,25 @@ output = flash_attention(query, key, value, version="fa2", causal=True)
 output.sum().backward()
 ```
 
+Generate from a small model, naive or with a KV cache:
+
+```python
+import torch
+
+from llminfra import CausalLMModel
+
+model = CausalLMModel(
+    vocab_size=1000, hidden_size=256, num_layers=4, num_heads=8,
+    intermediate_size=512,
+)
+model.eval()  # disable dropout so the two paths are deterministic
+prompt = torch.randint(0, 1000, (1, 8))
+
+naive = model.generate(prompt, max_new_tokens=16)
+cached = model.generate(prompt, max_new_tokens=16, use_cache=True)
+assert torch.equal(naive.sequences, cached.sequences)  # same tokens, less work
+```
+
 ## Package Layout
 
 | Path | Responsibility |
@@ -103,10 +140,12 @@ output.sum().backward()
 | `llminfra/layers/` | FFN, normalization, SSM, and Transformer layers |
 | `llminfra/models/` | Language, encoder, encoder-decoder, and multimodal models |
 | `llminfra/moe/` | Routers, experts, and Mixture-of-Experts modules |
-| `llminfra/inference/` | KV caches, paging, offload, and sparse indexing |
+| `llminfra/inference/` | KV caches (paged / quantized / tiered) and sparse indexing |
 | `llminfra/spec_decode/` | N-Gram, EAGLE, Medusa, MTP, DFlash, and DSpark |
-| `llminfra/quantization.py` | Fake quantization and QAT utilities |
-| `examples/` | Runnable per-module benchmark scripts |
+| `llminfra/generation.py` | Logits processors and greedy/sampling decode loops |
+| `llminfra/optimizers.py` | Muon / MuonClip optimizers |
+| `llminfra/quantization.py` | Fake quantization (INT4/INT8/FP8/MXFP4/NVFP4) and QAT |
+| `examples/` | Benchmarks (`benchmark/`), training demos, and a real-model generate example |
 | `tests/` | Tests organized to mirror the source package |
 
 Public APIs are re-exported from `llminfra`. Import implementation modules
@@ -130,12 +169,13 @@ pre-commit run --all-files
 ```
 
 The CPU test suite covers functional behavior, masks, gradients, public APIs,
-cache semantics, and speculative decoding. CUDA-specific FlashAttention tests
-are skipped when CUDA is unavailable.
+cache semantics, generation, and speculative decoding. CUDA-specific
+FlashAttention tests are skipped when CUDA is unavailable.
 
 ## Documentation
 
 - [Chinese README](README.zh-CN.md)
+- [Module ↔ paper ↔ transformers cross-reference](llminfra_guide.md)
 - [Transformer Review 2026](docs/transformers_review_2026.md)
 - [Package layout and naming conventions](llminfra/README.md)
 
