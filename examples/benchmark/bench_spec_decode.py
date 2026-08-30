@@ -13,7 +13,7 @@ being optimized.
 Timings are medians over an adaptively chosen number of repeats. Run from
 the repository root:
 
-    python examples/bench_spec_decode.py
+    python examples/benchmark/bench_spec_decode.py
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from torch import nn
 
 # The package is not pip-installed in this repo; make the script runnable
 # directly from any working directory.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from llminfra.spec_decode import (
     EagleSpeculator,

@@ -8,7 +8,7 @@ covering short prefill, long prefill and decode-like single-step calls.
 Timings are medians over an adaptively chosen number of repeats. Run from
 the repository root:
 
-    python examples/bench_layers.py
+    python examples/benchmark/bench_layers.py
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ import torch
 
 # The package is not pip-installed in this repo; make the script runnable
 # directly from any working directory.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from llminfra.layers.feed_forward import FeedForward, SwiGLUFFN
 from llminfra.layers.gated_feed_forward import ClampedSwiGLUFFN, GeGLUFFN

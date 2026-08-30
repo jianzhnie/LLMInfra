@@ -11,7 +11,7 @@ Measures wall time for the hot paths of `llminfra.inference`:
 Timings are medians over an adaptively chosen number of repeats. Run from
 the repository root:
 
-    python examples/bench_inference.py
+    python examples/benchmark/bench_inference.py
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ import torch
 
 # The package is not pip-installed in this repo; make the script runnable
 # directly from any working directory.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from llminfra.inference import (
     BlockSparseIndexer,

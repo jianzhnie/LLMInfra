@@ -5,7 +5,7 @@ matrix covering typical prefill/decode sizes (batch 1-4, seq 128-2048,
 hidden 256-512). Timings are medians over an adaptively chosen number of
 repeats. Run from the repository root:
 
-    python examples/bench_attention.py
+    python examples/benchmark/bench_attention.py
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ import torch
 
 # The package is not pip-installed in this repo; make the script runnable
 # directly from any working directory.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from llminfra.attention import (
     ALiBiAttention,

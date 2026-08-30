@@ -8,7 +8,7 @@ causal / non-causal and padding-mask variants.
 Timings are medians over an adaptively chosen number of repeats. Run from
 the repository root:
 
-    python examples/bench_flash_attention.py
+    python examples/benchmark/bench_flash_attention.py
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ import torch
 
 # The package is not pip-installed in this repo; make the script runnable
 # directly from any working directory.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from llminfra.flash_attention import ATTENTION_FN_REGISTRY, list_versions
 from llminfra.flash_attention.common import FlashAttentionConfig, reference_attention

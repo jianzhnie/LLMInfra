@@ -8,7 +8,7 @@ one module instance per layer stack.
 Timings are medians over an adaptively chosen number of repeats. Run from
 the repository root:
 
-    python examples/bench_positional.py
+    python examples/benchmark/bench_positional.py
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ import torch
 
 # The package is not pip-installed in this repo; make the script runnable
 # directly from any working directory.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from llminfra.positional import (
     ALiBiBias,

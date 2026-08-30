@@ -8,7 +8,7 @@ attention/positional subpackages and are out of scope here.
 
 Run from the repository root:
 
-    python examples/bench_module_registry.py
+    python examples/benchmark/bench_module_registry.py
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from pathlib import Path
 
 # The package is not pip-installed in this repo; make the script runnable
 # directly from any working directory.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from llminfra.module_registry import (
     ATTENTION_REGISTRY,
