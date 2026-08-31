@@ -1,6 +1,7 @@
 # LLMInfra 模块 ↔ 论文 ↔ transformers 实现 对照索引
 
 > `Paper` 链接指向 arXiv;`transformers` 链接指向 GitHub `huggingface/transformers` main 分支 `src/transformers/` 下的对应文件(文件级,不含行号)。
+> 最后更新:2026-08(全部 104 个链接已逐一核验可访问,arXiv 编号已比对论文标题)。
 
 ### Attention — 经典(`llminfra/attention/`)
 
@@ -113,7 +114,7 @@ transformers 无手写 FA 内核,权威参照为论文公式、[官方 CUDA 实�
 | `common/ops.py`(merge/LSE/梯度重算) | FA1 Alg.1 在线 softmax;FA2 Alg.2 延迟归一化 + LSE 重算 + rowsum 技巧 | [Paper: FA1](https://arxiv.org/abs/2205.14135)、[FA2](https://arxiv.org/abs/2307.08691)、[Code](https://github.com/Dao-AILab/flash-attention) |
 | `flash_attention_v1/v2` | KV 外循环 / query-tile ownership + 延迟归一化 | [Paper: FA1](https://arxiv.org/abs/2205.14135)、[FA2](https://arxiv.org/abs/2307.08691)、[Code](https://github.com/Dao-AILab/flash-attention) |
 | `flash_attention_v3` | ping-pong 双缓冲、FP8 per-tile 量化模拟 | [Paper: FA3](https://arxiv.org/abs/2407.08608)、[Code](https://github.com/Dao-AILab/flash-attention) |
-| `flash_attention_v4` | wave 调度 + 三角色;selective rescale | [Blog: FA4](https://tridao.me/blog/2026/flash4/)、[Code](https://github.com/Dao-AILab/flash-attention) |
+| `flash_attention_v4` | wave 调度 + 三角色;selective rescale | [Paper: FA4](https://arxiv.org/abs/2603.05451)、[Blog: FA4](https://tridao.me/blog/2026/flash4/)、[Code](https://github.com/Dao-AILab/flash-attention) |
 
 ### Inference & Quantization
 
